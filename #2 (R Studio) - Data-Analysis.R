@@ -16,21 +16,20 @@
 #   3. Build K = 5 aquaculture prototypes.
 #   4. Generate cosine similarities and class-separation margins.
 #   5. Derive the 90/95/99% target-retention cosine thresholds.
-#   6. Select production prototype variables using the pre-specified
-#      >=80% cumulative prototype-importance rule.
-#   7. Run leakage-free, stratified 5-fold SITE-level internal CV diagnostics.
-#      All centroids, prototypes and prototype selection are rebuilt inside
-#      each training fold before the held-out fold is predicted.
-#   8. Run a SITE-level bootstrap for centroid and threshold stability.
-#   9. Archive all vectors, diagnostics and provenance needed for the blind
+#   6. Run leakage-free, stratified 5-fold SITE-level internal CV diagnostics.
+#      All class representatives and prototypes are rebuilt inside each
+#      training fold before the held-out fold is predicted.
+#   7. Run a SITE-level bootstrap for centroid and threshold stability.
+#   8. Archive all vectors, diagnostics and provenance needed for the held-out
 #      2025 GEE evaluation and later manuscript/supplementary analyses.
 #
 # IMPORTANT
 #
 #   - This script uses ONLY 2024 development/reference data.
 #   - The 2025 evaluation data must not influence any choice below.
-#   - Production quantities use all 20 + 20 + 20 development sites.
-#   - Internal CV is diagnostic only; the blind 2025 evaluation remains the
+#   - Full-development quantities use all 20 + 20 + 20 development sites.
+#   - All five aquaculture prototypes are retained in the final CR-RF.
+#   - Internal CV is diagnostic only; the held-out 2025 evaluation remains the
 #     primary model assessment.
 #   - Pixels are classifier observations, but resampling/splitting is always
 #     performed by SITE.
@@ -78,12 +77,8 @@ EXPECTED_CLASSES <- c(CLASS_TARGET, CLASS_OCEAN, CLASS_CONF)
 K <- 5
 KMEANS_NSTART <- 50
 KMEANS_ITER_MAX <- 100
-CUMULATIVE_IMPORTANCE_TARGET <- 0.80
-
 INTERNAL_CV_FOLDS <- 5
 RF_TREES_INTERNAL <- 500
-RF_TREES_PRODUCTION_DIAGNOSTIC <- 500
-
 BOOTSTRAP_REPS <- 500
 
 K_DIAGNOSTIC_RANGE <- 2:10
@@ -91,9 +86,6 @@ K_DIAGNOSTIC_MAX_PIXELS <- 2500
 
 BASE_SEED <- 123
 SEED_KMEANS <- BASE_SEED
-SEED_PRODUCTION_SELECTOR <- BASE_SEED + 10
-SEED_PRODUCTION_SRF <- BASE_SEED + 20
-SEED_PRODUCTION_CRRF <- BASE_SEED + 30
 SEED_CV_FOLDS <- BASE_SEED + 100
 SEED_CV_BASE <- BASE_SEED + 1000
 SEED_BOOTSTRAP <- BASE_SEED + 10000
@@ -102,7 +94,7 @@ SEED_K_DIAGNOSTIC <- BASE_SEED + 20000
 NORM_WARNING_TOLERANCE <- 0.02
 
 # Final GEE SRF/CR-RF settings are applied in GEE, not here.
-# The R random forests below are development diagnostics / prototype selectors.
+# The R random forests below are internal development diagnostics only.
 
 
 dir.create(
@@ -407,63 +399,6 @@ density_overlap <- function(x, y, n = 4096) {
 }
 
 
-extract_gini_importance <- function(model) {
-  imp <- importance(model)
-  
-  if (!"MeanDecreaseGini" %in% colnames(imp)) {
-    stop("MeanDecreaseGini was not returned by randomForest::importance().")
-  }
-  
-  tibble(
-    Feature = rownames(imp),
-    MeanDecreaseGini = imp[, "MeanDecreaseGini"]
-  ) %>%
-    arrange(desc(MeanDecreaseGini))
-}
-
-
-select_prototypes_from_importance <- function(
-    importance_df,
-    prototype_names,
-    cumulative_target
-) {
-  proto_importance <- importance_df %>%
-    filter(Feature %in% prototype_names) %>%
-    arrange(desc(MeanDecreaseGini))
-  
-  importance_sum <- sum(
-    proto_importance$MeanDecreaseGini,
-    na.rm = TRUE
-  )
-  
-  if (!is.finite(importance_sum) || importance_sum <= 0) {
-    stop(
-      "Prototype importance sums to zero or less; prototype selection cannot proceed."
-    )
-  }
-  
-  proto_importance <- proto_importance %>%
-    mutate(
-      Relative_Importance = MeanDecreaseGini / importance_sum,
-      Cumulative_Importance = cumsum(Relative_Importance)
-    )
-  
-  cutoff <- which(
-    proto_importance$Cumulative_Importance >= cumulative_target
-  )[1]
-  
-  selected <- proto_importance[
-    seq_len(cutoff),
-    ,
-    drop = FALSE
-  ]
-  
-  list(
-    all = proto_importance,
-    selected = selected,
-    names = selected$Feature
-  )
-}
 
 
 sample_site_indices <- function(index_list, sampled_sites) {
@@ -1471,61 +1406,11 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.16 PRODUCTION PROTOTYPE SELECTION
+  # 4.16 STAGED FEATURE SETS
   # ==========================================================================
-  # All 2024 reference sites are legitimate development data.
-  # The genuinely blind assessment is the spatially + temporally held-out
-  # 2025 evaluation AOI. Therefore production prototype selection is fitted
-  # using the complete 2024 development set.
-  # ==========================================================================
-  
-  selector_features <- c(
-    embedding_cols,
-    class_similarity_cols,
-    margin_cols,
-    prototype_names
-  )
-  
-  set.seed(SEED_PRODUCTION_SELECTOR)
-  
-  production_selector_model <- randomForest(
-    x = as.data.frame(
-      production_df[, selector_features, drop = FALSE]
-    ),
-    y = factor(
-      production_df$class,
-      levels = EXPECTED_CLASSES
-    ),
-    ntree = RF_TREES_PRODUCTION_DIAGNOSTIC,
-    importance = TRUE
-  )
-  
-  production_selector_importance <- extract_gini_importance(
-    production_selector_model
-  )
-  
-  production_prototype_selection <-
-    select_prototypes_from_importance(
-      importance_df = production_selector_importance,
-      prototype_names = prototype_names,
-      cumulative_target = CUMULATIVE_IMPORTANCE_TARGET
-    )
-  
-  prototype_importance <-
-    production_prototype_selection$all
-  
-  selected_prototypes <-
-    production_prototype_selection$selected
-  
-  selected_proto_names <-
-    production_prototype_selection$names
-  
-  cat("\nProduction selected prototypes:\n")
-  print(selected_proto_names)
-  
-  
-  # ==========================================================================
-  # 4.17 PRODUCTION FEATURE SETS
+  # The final CR-RF retains all K = 5 aquaculture prototype-similarity
+  # variables. The preceding feature sets are retained only for diagnostic
+  # ablation of the engineered feature groups.
   # ==========================================================================
   
   production_feature_sets <- list(
@@ -1544,17 +1429,6 @@ process_region <- function(region_name) {
       class_similarity_cols,
       margin_cols,
       prototype_names
-    ),
-    CRRF_Selected = c(
-      embedding_cols,
-      class_similarity_cols,
-      margin_cols,
-      selected_proto_names
-    ),
-    EngineeredOnly_Selected = c(
-      class_similarity_cols,
-      margin_cols,
-      selected_proto_names
     )
   )
   
@@ -1585,54 +1459,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.18 PRODUCTION RF IMPORTANCE ARCHIVE
-  # ==========================================================================
-  # These models are descriptive only. Final mapping RFs are trained in GEE.
-  # ==========================================================================
-  
-  set.seed(SEED_PRODUCTION_SRF)
-  
-  production_srf_model <- randomForest(
-    x = as.data.frame(
-      production_df[, embedding_cols, drop = FALSE]
-    ),
-    y = factor(
-      production_df$class,
-      levels = EXPECTED_CLASSES
-    ),
-    ntree = RF_TREES_PRODUCTION_DIAGNOSTIC,
-    importance = TRUE
-  )
-  
-  production_srf_importance <- extract_gini_importance(
-    production_srf_model
-  )
-  
-  set.seed(SEED_PRODUCTION_CRRF)
-  
-  production_crrf_model <- randomForest(
-    x = as.data.frame(
-      production_df[
-        ,
-        production_feature_sets$CRRF_Selected,
-        drop = FALSE
-      ]
-    ),
-    y = factor(
-      production_df$class,
-      levels = EXPECTED_CLASSES
-    ),
-    ntree = RF_TREES_PRODUCTION_DIAGNOSTIC,
-    importance = TRUE
-  )
-  
-  production_crrf_importance <- extract_gini_importance(
-    production_crrf_model
-  )
-  
-  
-  # ==========================================================================
-  # 4.19 STRATIFIED 5-FOLD SITE ASSIGNMENT
+  # 4.17 STRATIFIED 5-FOLD SITE ASSIGNMENT
   # ==========================================================================
   # With 20 sites/class and 5 folds, each held-out fold contains exactly
   # 4 independent sites from each class.
@@ -1703,14 +1530,13 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.20 LEAKAGE-FREE INTERNAL CV ABLATION
+  # 4.18 LEAKAGE-FREE INTERNAL CV ABLATION
   # ==========================================================================
   # For each fold:
   #   - held-out sites are excluded first;
   #   - class representatives are rebuilt from training sites only;
   #   - K=5 prototypes are rebuilt from training target sites only;
   #   - engineered variables are generated from training-only quantities;
-  #   - prototype selection is fitted on training-fold data only;
   #   - the untouched held-out sites are then predicted.
   # ==========================================================================
   
@@ -1720,8 +1546,6 @@ process_region <- function(region_name) {
   cv_fold_site_class_list <- list()
   cv_fold_confusion_list <- list()
   cv_fold_site_votes_list <- list()
-  cv_selected_proto_list <- list()
-  cv_selector_importance_list <- list()
   
   cv_record_index <- 1
   
@@ -1771,56 +1595,6 @@ process_region <- function(region_name) {
     
     fold_proto_names <- fold_engineering$prototype_names
     
-    fold_selector_features <- c(
-      embedding_cols,
-      class_similarity_cols,
-      margin_cols,
-      fold_proto_names
-    )
-    
-    set.seed(
-      SEED_CV_BASE + 100 + fold
-    )
-    
-    fold_selector_model <- randomForest(
-      x = as.data.frame(
-        train_fold[
-          ,
-          fold_selector_features,
-          drop = FALSE
-        ]
-      ),
-      y = factor(
-        train_fold$class,
-        levels = EXPECTED_CLASSES
-      ),
-      ntree = RF_TREES_INTERNAL,
-      importance = TRUE
-    )
-    
-    fold_selector_importance <- extract_gini_importance(
-      fold_selector_model
-    )
-    
-    fold_selection <- select_prototypes_from_importance(
-      importance_df = fold_selector_importance,
-      prototype_names = fold_proto_names,
-      cumulative_target = CUMULATIVE_IMPORTANCE_TARGET
-    )
-    
-    fold_selected_proto_names <- fold_selection$names
-    
-    cv_selected_proto_list[[fold]] <- fold_selection$selected %>%
-      mutate(
-        Fold = fold,
-        Selected_Prototype_Count = length(fold_selected_proto_names)
-      )
-    
-    cv_selector_importance_list[[fold]] <- fold_selector_importance %>%
-      mutate(
-        Fold = fold
-      )
-    
     fold_variant_features <- list(
       Raw64 = embedding_cols,
       Raw64_ClassSimilarity = c(
@@ -1837,17 +1611,6 @@ process_region <- function(region_name) {
         class_similarity_cols,
         margin_cols,
         fold_proto_names
-      ),
-      CRRF_Selected = c(
-        embedding_cols,
-        class_similarity_cols,
-        margin_cols,
-        fold_selected_proto_names
-      ),
-      EngineeredOnly_Selected = c(
-        class_similarity_cols,
-        margin_cols,
-        fold_selected_proto_names
       )
     )
     
@@ -1898,14 +1661,6 @@ process_region <- function(region_name) {
         Fold = fold,
         Variant = variant_name,
         N_Features = length(features),
-        Selected_Prototype_Count = ifelse(
-          variant_name %in% c(
-            "CRRF_Selected",
-            "EngineeredOnly_Selected"
-          ),
-          length(fold_selected_proto_names),
-          NA_integer_
-        ),
         Pixel_Accuracy = pixel_metrics$overall$Accuracy,
         Pixel_Balanced_Accuracy = pixel_metrics$overall$Balanced_Accuracy,
         Pixel_Macro_F1 = pixel_metrics$overall$Macro_F1,
@@ -1985,18 +1740,8 @@ process_region <- function(region_name) {
   cv_fold_site_votes <- bind_rows(
     cv_fold_site_votes_list
   )
-  
-  cv_selected_prototypes <- bind_rows(
-    cv_selected_proto_list
-  )
-  
-  cv_selector_importance <- bind_rows(
-    cv_selector_importance_list
-  )
-  
-  
   # ==========================================================================
-  # 4.21 POOLED OUT-OF-FOLD INTERNAL CV METRICS
+  # 4.19 POOLED OUT-OF-FOLD INTERNAL CV METRICS
   # ==========================================================================
   
   pooled_cv_summary_list <- list()
@@ -2120,7 +1865,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.22 FOLD-TO-FOLD INTERNAL CV SUMMARY
+  # 4.20 FOLD-TO-FOLD INTERNAL CV SUMMARY
   # ==========================================================================
   
   cv_fold_variability <- cv_fold_summary %>%
@@ -2142,7 +1887,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.23 SITE-LEVEL BOOTSTRAP
+  # 4.21 SITE-LEVEL BOOTSTRAP
   # ==========================================================================
   # Entire sites are resampled within class. Individual pixels are never
   # resampled independently.
@@ -2406,35 +2151,11 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.24 GEE VECTOR TABLES
+  # 4.22 GEE VECTOR TABLE
   # ==========================================================================
-  # Vectors.csv contains only the selected production prototypes.
-  # Vectors_AllPrototypes.csv retains all K = 5 prototypes for ablation and
-  # reproducibility.
+  # The final vector table contains the three class representatives and all
+  # K = 5 aquaculture prototypes used by the final CR-RF.
   # ==========================================================================
-  
-  gee_vectors <- data.frame(
-    band = embedding_cols,
-    farm = production_engineering$target_centroid,
-    ocean = production_engineering$ocean_centroid,
-    conf = production_engineering$conf_centroid,
-    stringsAsFactors = FALSE
-  )
-  
-  for (proto_name in selected_proto_names) {
-    proto_index <- as.numeric(
-      sub(
-        "proto_",
-        "",
-        proto_name
-      )
-    )
-    
-    gee_vectors[[proto_name]] <-
-      production_engineering$prototypes[
-        proto_index,
-      ]
-  }
   
   gee_vectors_all <- data.frame(
     band = embedding_cols,
@@ -2451,7 +2172,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.25 COMPACT DIAGNOSTICS
+  # 4.23 COMPACT DIAGNOSTICS
   # ==========================================================================
   
   pooled_raw64 <- pooled_cv_summary %>%
@@ -2461,7 +2182,7 @@ process_region <- function(region_name) {
   
   pooled_crrf <- pooled_cv_summary %>%
     filter(
-      Variant == "CRRF_Selected"
+      Variant == "Raw64_ClassSimilarity_Margins_AllPrototypes"
     )
   
   diagnostics <- tibble(
@@ -2474,7 +2195,6 @@ process_region <- function(region_name) {
       "Ocean_Sites",
       "Confounding_Sites",
       "K",
-      "Selected_Prototype_Count",
       "Internal_CV_Folds",
       "Internal_CV_Raw64_Target_F1",
       "Internal_CV_CRRF_Target_F1",
@@ -2505,7 +2225,6 @@ process_region <- function(region_name) {
         ]
       ),
       K,
-      length(selected_proto_names),
       INTERNAL_CV_FOLDS,
       pooled_raw64$Target_F1,
       pooled_crrf$Target_F1,
@@ -2519,7 +2238,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.26 PROVENANCE MANIFEST
+  # 4.24 PROVENANCE MANIFEST
   # ==========================================================================
   
   input_md5 <- as.character(
@@ -2565,17 +2284,14 @@ process_region <- function(region_name) {
       "K",
       "KMeans_NStart",
       "KMeans_Iter_Max",
-      "Prototype_Cumulative_Importance_Target",
-      "Production_Selector_RF_Trees",
       "Internal_CV_Folds",
       "Internal_RF_Trees",
       "Bootstrap_Reps",
       "Seed_KMeans",
-      "Seed_Production_Selector",
       "Seed_CV_Folds",
       "Seed_CV_Base",
       "Seed_Bootstrap",
-      "Selected_Prototypes",
+      "Final_CRRF_Prototypes",
       "R_Version",
       "randomForest_Version",
       "cluster_Version",
@@ -2599,17 +2315,14 @@ process_region <- function(region_name) {
       K,
       KMEANS_NSTART,
       KMEANS_ITER_MAX,
-      CUMULATIVE_IMPORTANCE_TARGET,
-      RF_TREES_PRODUCTION_DIAGNOSTIC,
       INTERNAL_CV_FOLDS,
       RF_TREES_INTERNAL,
       BOOTSTRAP_REPS,
       SEED_KMEANS,
-      SEED_PRODUCTION_SELECTOR,
       SEED_CV_FOLDS,
       SEED_CV_BASE,
       SEED_BOOTSTRAP,
-      paste(selected_proto_names, collapse = ";"),
+      paste(prototype_names, collapse = ";"),
       R.version.string,
       as.character(packageVersion("randomForest")),
       as.character(packageVersion("cluster")),
@@ -2619,7 +2332,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.27 EXPORT CSV OUTPUTS
+  # 4.25 EXPORT CSV OUTPUTS
   # ==========================================================================
   
   created_files <- c(
@@ -2628,11 +2341,6 @@ process_region <- function(region_name) {
       production_df,
       region_name,
       "_Augmented.csv"
-    ),
-    write_region_output(
-      gee_vectors,
-      region_name,
-      "_Vectors.csv"
     ),
     write_region_output(
       gee_vectors_all,
@@ -2715,31 +2423,6 @@ process_region <- function(region_name) {
       "_KMeansDiagnostics.csv"
     ),
     write_region_output(
-      production_selector_importance,
-      region_name,
-      "_FeatureImportance_AllPrototypeSelector.csv"
-    ),
-    write_region_output(
-      prototype_importance,
-      region_name,
-      "_PrototypeImportance.csv"
-    ),
-    write_region_output(
-      selected_prototypes,
-      region_name,
-      "_SelectedPrototypes.csv"
-    ),
-    write_region_output(
-      production_srf_importance,
-      region_name,
-      "_FeatureImportance_SRF.csv"
-    ),
-    write_region_output(
-      production_crrf_importance,
-      region_name,
-      "_FeatureImportance_CRRF_Selected.csv"
-    ),
-    write_region_output(
       production_feature_manifest,
       region_name,
       "_ProductionFeatureManifest.csv"
@@ -2815,16 +2498,6 @@ process_region <- function(region_name) {
       "_InternalCV_FoldSiteVotes.csv"
     ),
     write_region_output(
-      cv_selected_prototypes,
-      region_name,
-      "_InternalCV_SelectedPrototypes.csv"
-    ),
-    write_region_output(
-      cv_selector_importance,
-      region_name,
-      "_InternalCV_SelectorImportance.csv"
-    ),
-    write_region_output(
       bootstrap_metrics,
       region_name,
       "_BootstrapMetrics.csv"
@@ -2853,7 +2526,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.28 SAVE COMPLETE ANALYSIS BUNDLE
+  # 4.26 SAVE COMPLETE ANALYSIS BUNDLE
   # ==========================================================================
   
   analysis_bundle <- list(
@@ -2867,26 +2540,18 @@ process_region <- function(region_name) {
       K = K,
       KMEANS_NSTART = KMEANS_NSTART,
       KMEANS_ITER_MAX = KMEANS_ITER_MAX,
-      CUMULATIVE_IMPORTANCE_TARGET = CUMULATIVE_IMPORTANCE_TARGET,
       INTERNAL_CV_FOLDS = INTERNAL_CV_FOLDS,
       RF_TREES_INTERNAL = RF_TREES_INTERNAL,
-      RF_TREES_PRODUCTION_DIAGNOSTIC = RF_TREES_PRODUCTION_DIAGNOSTIC,
       BOOTSTRAP_REPS = BOOTSTRAP_REPS
     ),
     embedding_cols = embedding_cols,
     site_qa = site_qa,
     production_engineering = production_engineering,
-    production_selected_prototypes = selected_proto_names,
-    production_prototype_importance = prototype_importance,
     cosine_thresholds = cosine_thresholds,
     production_feature_sets = production_feature_sets,
-    production_selector_model = production_selector_model,
-    production_srf_model = production_srf_model,
-    production_crrf_model = production_crrf_model,
     internal_cv_fold_assignments = fold_assignments,
     internal_cv_predictions = cv_predictions,
     internal_cv_pooled_summary = pooled_cv_summary,
-    internal_cv_selected_prototypes = cv_selected_prototypes,
     bootstrap_metrics = bootstrap_metrics,
     bootstrap_summary = bootstrap_summary,
     k_diagnostics = k_diagnostics
@@ -2909,7 +2574,7 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.29 SAVE SESSION INFO
+  # 4.27 SAVE SESSION INFO
   # ==========================================================================
   
   session_path <- region_output_file(
@@ -2931,22 +2596,20 @@ process_region <- function(region_name) {
   
   
   # ==========================================================================
-  # 4.30 REGION COMPLETE
+  # 4.28 REGION COMPLETE
   # ==========================================================================
   
   cat("\n------------------------------------------------------------\n")
   cat("REGION COMPLETE:", region_name, "\n")
   cat("------------------------------------------------------------\n")
   cat(
-    "Selected production prototypes:",
-    paste(selected_proto_names, collapse = ", "),
+    "Final CR-RF prototypes:",
+    paste(prototype_names, collapse = ", "),
     "\n"
   )
   cat(
     "Production files for GEE:\n  ",
     region_output_file(region_name, "_Augmented.csv"),
-    "\n  ",
-    region_output_file(region_name, "_Vectors.csv"),
     "\n  ",
     region_output_file(region_name, "_Vectors_AllPrototypes.csv"),
     "\n"
@@ -2977,10 +2640,7 @@ process_region <- function(region_name) {
         production_df$class == CLASS_CONF
       ]
     ),
-    Selected_Prototypes = paste(
-      selected_proto_names,
-      collapse = ";"
-    ),
+    N_Prototypes = K,
     Internal_CV_Raw64_Target_F1 = pooled_raw64$Target_F1,
     Internal_CV_CRRF_Target_F1 = pooled_crrf$Target_F1,
     Internal_CV_Raw64_Target_IoU = pooled_raw64$Target_IoU,
