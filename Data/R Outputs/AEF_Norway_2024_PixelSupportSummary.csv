@@ -1,4 +1,0 @@
-"class","n_sites","total_pixels","min_pixels_site","q25_pixels_site","median_pixels_site","mean_pixels_site","q75_pixels_site","max_pixels_site","sd_pixels_site","cv_pixels_site"
-"confounding_marine",20,1571,76,78,79,78.55,79,81,1.31689427302111,0.0167650448506825
-"ocean",20,1559,76,77,78,77.95,79,80,1.14593101656986,0.0147008469091708
-"target",20,1564,75,78,78,78.2,79,80,1.23969435961577,0.015852869048795

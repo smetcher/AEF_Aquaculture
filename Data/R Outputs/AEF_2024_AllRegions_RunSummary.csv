@@ -1,4 +1,0 @@
-"Region","Input_Pixels","Target_Sites","Ocean_Sites","Confounding_Sites","Selected_Prototypes","Internal_CV_Raw64_Target_F1","Internal_CV_CRRF_Target_F1","Internal_CV_Raw64_Target_IoU","Internal_CV_CRRF_Target_IoU"
-"Tasmania",4657,20,20,20,"proto_3;proto_5;proto_4",0.914615618353084,0.925115562403698,0.842665173572228,0.860665137614679
-"Chile",4634,20,20,20,"proto_4;proto_5;proto_3",0.814122533748702,0.815384615384615,0.686514886164623,0.688311688311688
-"Norway",4694,20,20,20,"proto_3;proto_4;proto_1",0.823125357756153,0.866485013623978,0.699416342412451,0.764423076923077
