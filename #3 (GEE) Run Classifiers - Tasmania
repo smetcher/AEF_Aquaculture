@@ -1,0 +1,5048 @@
+var YEAR = 2025;
+var DEVELOPMENT_YEAR = 2024;
+var REGION = 'Tasmania';
+var SCALE = 10;
+var ISOLATED_RADIUS_M = 50;
+var MIN_CONNECTED_PIXELS = 5;
+var AOI_SIZE_M = 30000;
+var AOI_HALF_SIZE_M = AOI_SIZE_M / 2;
+
+var AOI_CRS = 'EPSG:32755';
+var AOI_PROJ = ee.Projection(AOI_CRS);
+var EVAL_PROJ = AOI_PROJ.atScale(SCALE);
+
+var RF_NUMBER_OF_TREES = 150;
+var RF_VARIABLES_PER_SPLIT = 8;
+var RF_MIN_LEAF_POPULATION = 5;
+var RF_BAG_FRACTION = 0.7;
+var RF_SEED = 123;
+
+var AUGMENTED_ASSET =
+  'projects/alphaearth-490619/assets/AEF_Tasmania_2024_Augmented';
+
+var VECTORS_ALL_ASSET =
+  'projects/alphaearth-490619/assets/AEF_Tasmania_2024_Vectors_AllPrototypes';
+
+var COSINE_90 = 0.974697009456026;
+var COSINE_95 = 0.971573040314376;
+var COSINE_99 = 0.964672863247496;
+
+var EXPORT_TABLES = true;
+var EXPORT_PREDICTION_STACK = true;
+
+
+var aoiCentreProjected =
+  AOI_Area.transform(
+    AOI_PROJ,
+    1
+  );
+
+var centreXY =
+  ee.List(
+    aoiCentreProjected.coordinates()
+  );
+
+var centreX =
+  ee.Number(
+    centreXY.get(0)
+  );
+
+var centreY =
+  ee.Number(
+    centreXY.get(1)
+  );
+
+var scanningArea =
+  ee.Geometry.Rectangle(
+    ee.List([
+      centreX.subtract(AOI_HALF_SIZE_M),
+      centreY.subtract(AOI_HALF_SIZE_M),
+      centreX.add(AOI_HALF_SIZE_M),
+      centreY.add(AOI_HALF_SIZE_M)
+    ]),
+    AOI_PROJ,
+    false
+  );
+
+var centreLonLat =
+  AOI_Area
+    .transform(
+      'EPSG:4326',
+      1
+    )
+    .coordinates();
+
+
+print('=================================================');
+print('FINAL TASMANIA HELD-OUT EVALUATION');
+print('=================================================');
+
+print(
+  'Region:',
+  REGION
+);
+
+print(
+  'Development year:',
+  DEVELOPMENT_YEAR
+);
+
+print(
+  'Evaluation year:',
+  YEAR
+);
+
+print(
+  'AOI centre [longitude, latitude]:',
+  centreLonLat
+);
+
+print(
+  'AOI dimensions:',
+  AOI_SIZE_M / 1000 +
+  ' km x ' +
+  AOI_SIZE_M / 1000 +
+  ' km'
+);
+
+print(
+  'Evaluation CRS:',
+  AOI_CRS
+);
+
+
+var bandNames =
+  ee.List.sequence(
+    0,
+    63
+  )
+  .map(
+    function(n) {
+
+      return ee.String('A')
+        .cat(
+          ee.Number(n)
+            .format('%02d')
+        );
+
+    }
+  );
+
+
+var calibration_key =
+  ee.FeatureCollection(
+    AUGMENTED_ASSET
+  );
+
+var vectorsAll =
+  ee.FeatureCollection(
+    VECTORS_ALL_ASSET
+  )
+  .sort(
+    'band'
+  );
+
+
+var developmentRegions =
+  calibration_key
+    .aggregate_array(
+      'region'
+    )
+    .distinct()
+    .getInfo();
+
+
+if (
+  developmentRegions.length !== 1 ||
+  developmentRegions[0] !== REGION
+) {
+
+  throw new Error(
+    'DEVELOPMENT QA FAILED: expected region Tasmania, found: ' +
+    developmentRegions
+  );
+
+}
+
+
+function countDevelopmentSites(
+  className
+) {
+
+  return calibration_key
+    .filter(
+      ee.Filter.eq(
+        'class',
+        className
+      )
+    )
+    .aggregate_array(
+      'site_id'
+    )
+    .distinct()
+    .size()
+    .getInfo();
+
+}
+
+
+var developmentTargetSites =
+  countDevelopmentSites(
+    'target'
+  );
+
+var developmentOceanSites =
+  countDevelopmentSites(
+    'ocean'
+  );
+
+var developmentConfoundingSites =
+  countDevelopmentSites(
+    'confounding_marine'
+  );
+
+
+if (
+  developmentTargetSites !== 20 ||
+  developmentOceanSites !== 20 ||
+  developmentConfoundingSites !== 20
+) {
+
+  throw new Error(
+    'DEVELOPMENT QA FAILED: expected 20 / 20 / 20 sites. ' +
+    'Found target=' +
+    developmentTargetSites +
+    ', ocean=' +
+    developmentOceanSites +
+    ', confounding=' +
+    developmentConfoundingSites
+  );
+
+}
+
+
+var developmentSamplingCRS =
+  calibration_key
+    .aggregate_array(
+      'sampling_crs'
+    )
+    .distinct()
+    .getInfo();
+
+
+if (
+  developmentSamplingCRS.length !== 1 ||
+  developmentSamplingCRS[0] !== AOI_CRS
+) {
+
+  throw new Error(
+    'DEVELOPMENT QA FAILED: expected sampling CRS ' +
+    AOI_CRS +
+    ', found: ' +
+    developmentSamplingCRS
+  );
+
+}
+
+
+var developmentSamplingScales =
+  calibration_key
+    .aggregate_array(
+      'sampling_scale_m'
+    )
+    .distinct()
+    .getInfo();
+
+
+if (
+  developmentSamplingScales.length !== 1 ||
+  Number(developmentSamplingScales[0]) !== SCALE
+) {
+
+  throw new Error(
+    'DEVELOPMENT QA FAILED: expected 10 m sampling scale, found: ' +
+    developmentSamplingScales
+  );
+
+}
+
+
+var developmentSamplingRadii =
+  calibration_key
+    .aggregate_array(
+      'sampling_radius_m'
+    )
+    .distinct()
+    .getInfo();
+
+
+if (
+  developmentSamplingRadii.length !== 1 ||
+  Number(developmentSamplingRadii[0]) !== 50
+) {
+
+  throw new Error(
+    'DEVELOPMENT QA FAILED: expected 50 m sampling radius, found: ' +
+    developmentSamplingRadii
+  );
+
+}
+
+
+var developmentSiteFeatures =
+  calibration_key
+    .distinct([
+      'site_id'
+    ])
+    .map(
+      function(f) {
+
+        var lon =
+          ee.Number(
+            f.get(
+              'centroid_lon'
+            )
+          );
+
+        var lat =
+          ee.Number(
+            f.get(
+              'centroid_lat'
+            )
+          );
+
+        var radius =
+          ee.Number(
+            f.get(
+              'sampling_radius_m'
+            )
+          );
+
+        var centre =
+          ee.Geometry.Point(
+            ee.List([
+              lon,
+              lat
+            ]),
+            'EPSG:4326'
+          );
+
+        var footprint =
+          centre.buffer(
+            radius,
+            1
+          );
+
+        return ee.Feature(
+          footprint,
+          {
+            site_id:
+              f.get(
+                'site_id'
+              ),
+
+            class:
+              f.get(
+                'class'
+              )
+          }
+        );
+
+      }
+    );
+
+
+var overlappingDevelopmentSites =
+  developmentSiteFeatures
+    .filterBounds(
+      scanningArea
+    );
+
+var overlappingDevelopmentIDs =
+  overlappingDevelopmentSites
+    .aggregate_array(
+      'site_id'
+    )
+    .getInfo();
+
+
+if (
+  overlappingDevelopmentIDs.length > 0
+) {
+
+  throw new Error(
+    'SPATIAL HOLDOUT QA FAILED: 2024 development footprints intersect ' +
+    'the 2025 evaluation AOI: ' +
+    overlappingDevelopmentIDs.join(', ')
+  );
+
+}
+
+
+var allVectorRows =
+  vectorsAll
+    .size()
+    .getInfo();
+
+
+if (
+  allVectorRows !== 64
+) {
+
+  throw new Error(
+    'VECTOR QA FAILED: expected exactly 64 vector rows.'
+  );
+
+}
+
+
+var allProtoNames =
+  ee.List(
+    vectorsAll
+      .first()
+      .propertyNames()
+  )
+  .filter(
+    ee.Filter.stringStartsWith(
+      'item',
+      'proto_'
+    )
+  )
+  .sort()
+  .getInfo();
+
+
+var expectedProtoNames = [
+  'proto_1',
+  'proto_2',
+  'proto_3',
+  'proto_4',
+  'proto_5'
+];
+
+
+if (
+  allProtoNames.length !== 5 ||
+  JSON.stringify(allProtoNames) !== JSON.stringify(expectedProtoNames)
+) {
+
+  throw new Error(
+    'VECTOR QA FAILED: expected prototype columns proto_1 through proto_5. Found: ' +
+    allProtoNames.join(', ')
+  );
+
+}
+
+
+var allProtoColumns =
+  ee.List(
+    allProtoNames
+  );
+
+
+print(
+  'Development-site counts:',
+  {
+    target:
+      developmentTargetSites,
+
+    ocean:
+      developmentOceanSites,
+
+    confounding_marine:
+      developmentConfoundingSites
+  }
+);
+
+print(
+  'Development sampling CRS:',
+  developmentSamplingCRS
+);
+
+print(
+  'Development/AOI overlap count:',
+  overlappingDevelopmentIDs.length
+);
+
+print(
+  'Final CR-RF prototypes:',
+  allProtoNames
+);
+
+
+var groundTruthPolygons =
+  ground_truth_poly.map(
+    function(f) {
+
+      return ee.Feature(
+        f.geometry(),
+        f.toDictionary()
+      )
+      .set({
+        object_type:
+          'polygon',
+
+        radius_m:
+          0
+      });
+
+    }
+  );
+
+
+var groundTruthRadial =
+  ground_truth_radial.map(
+    function(f) {
+
+      return ee.Feature(
+        f.geometry()
+          .buffer(
+            ISOLATED_RADIUS_M
+          ),
+        f.toDictionary()
+      )
+      .set({
+        object_type:
+          'radial',
+
+        radius_m:
+          ISOLATED_RADIUS_M
+      });
+
+    }
+  );
+
+
+var groundTruthUnindexed =
+  groundTruthPolygons
+    .merge(
+      groundTruthRadial
+    )
+    .filterBounds(
+      scanningArea
+    );
+
+
+var groundTruthCount =
+  groundTruthUnindexed
+    .size()
+    .getInfo();
+
+
+if (
+  groundTruthCount < 1
+) {
+
+  throw new Error(
+    'GROUND-TRUTH QA FAILED: no validation objects intersect the AOI.'
+  );
+
+}
+
+
+var gtList =
+  groundTruthUnindexed.toList(
+    groundTruthUnindexed.size()
+  );
+
+var gtIndex =
+  ee.List.sequence(
+    0,
+    groundTruthUnindexed
+      .size()
+      .subtract(1)
+  );
+
+
+var groundTruth =
+  ee.FeatureCollection(
+    gtIndex.map(
+      function(i) {
+
+        i =
+          ee.Number(i);
+
+        var f =
+          ee.Feature(
+            gtList.get(i)
+          );
+
+        var objectType =
+          ee.String(
+            f.get(
+              'object_type'
+            )
+          );
+
+        var validationID =
+          objectType
+            .cat('_')
+            .cat(
+              i.add(1)
+                .format('%03d')
+            );
+
+        return f.set(
+          'validation_id',
+          validationID
+        );
+
+      }
+    )
+  );
+
+
+var worldCover =
+  ee.ImageCollection(
+    'ESA/WorldCover/v200'
+  )
+  .first()
+  .select(
+    'Map'
+  );
+
+
+var marineMask =
+  worldCover
+    .eq(80)
+    .unmask(0)
+    .toByte()
+    .rename(
+      'marine_mask'
+    )
+    .clip(
+      scanningArea
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+
+var evaluationDomain =
+  marineMask
+    .eq(1)
+    .toByte()
+    .rename(
+      'evaluation_domain'
+    )
+    .clip(
+      scanningArea
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+
+var aefCollection =
+  ee.ImageCollection(
+    'GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL'
+  )
+  .filterDate(
+    YEAR + '-01-01',
+    (YEAR + 1) + '-01-01'
+  )
+  .filterBounds(
+    scanningArea
+  );
+
+
+var evaluationAEFTileCount =
+  aefCollection
+    .size()
+    .getInfo();
+
+
+if (
+  evaluationAEFTileCount < 1
+) {
+
+  throw new Error(
+    'No AEF imagery intersects the evaluation AOI.'
+  );
+
+}
+
+
+var evaluationAEFUTMZones =
+  ee.List(
+    aefCollection.aggregate_array(
+      'UTM_ZONE'
+    )
+  )
+  .distinct()
+  .sort()
+  .join('|');
+
+
+var evaluationAEFDatasetVersions =
+  ee.List(
+    aefCollection.aggregate_array(
+      'DATASET_VERSION'
+    )
+  )
+  .distinct()
+  .sort()
+  .join('|');
+
+
+var evaluationAEFModelVersions =
+  ee.List(
+    aefCollection.aggregate_array(
+      'MODEL_VERSION'
+    )
+  )
+  .distinct()
+  .sort()
+  .join('|');
+
+
+var evaluationAEFProcessingVersions =
+  ee.List(
+    aefCollection.aggregate_array(
+      'PROCESSING_SOFTWARE_VERSION'
+    )
+  )
+  .distinct()
+  .sort()
+  .join('|');
+
+
+var aef =
+  aefCollection
+    .mosaic()
+    .select(
+      bandNames
+    )
+    .clip(
+      scanningArea
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    )
+    .updateMask(
+      evaluationDomain
+    );
+
+
+function applyMinimumConnectedPixels(
+  binaryImage,
+  outputName
+) {
+
+  var binary =
+    binaryImage
+      .clip(
+        scanningArea
+      )
+      .unmask(0)
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+  var connectedPixels =
+    binary
+      .selfMask()
+      .connectedPixelCount(
+        MIN_CONNECTED_PIXELS,
+        true
+      );
+
+  return binary
+    .updateMask(
+      connectedPixels.gte(
+        MIN_CONNECTED_PIXELS
+      )
+    )
+    .unmask(0)
+    .toByte()
+    .rename(
+      outputName
+    )
+    .clip(
+      scanningArea
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+}
+
+
+var train_data =
+  calibration_key.map(
+    function(f) {
+
+      var className =
+        ee.String(
+          f.get(
+            'class'
+          )
+        );
+
+      var classID =
+        ee.Number(
+          ee.Algorithms.If(
+            className.equals(
+              'target'
+            ),
+            1,
+            ee.Algorithms.If(
+              className.equals(
+                'ocean'
+              ),
+              2,
+              3
+            )
+          )
+        );
+
+      return f.set(
+        'class_id',
+        classID
+      );
+
+    }
+  );
+
+
+var farmVector =
+  ee.Array(
+    vectorsAll.aggregate_array(
+      'farm'
+    )
+  );
+
+var oceanVector =
+  ee.Array(
+    vectorsAll.aggregate_array(
+      'ocean'
+    )
+  );
+
+var confVector =
+  ee.Array(
+    vectorsAll.aggregate_array(
+      'conf'
+    )
+  );
+
+
+function similarityBand(
+  image,
+  vector,
+  name
+) {
+
+  var imageColumn =
+    image
+      .select(
+        bandNames
+      )
+      .toArray()
+      .toArray(1);
+
+  var vectorArray =
+    ee.Array(
+      vector
+    );
+
+  var vectorColumn =
+    vectorArray.reshape([
+      64,
+      1
+    ]);
+
+  var dotProduct =
+    imageColumn
+      .arrayTranspose()
+      .matrixMultiply(
+        vectorColumn
+      )
+      .arrayGet([
+        0,
+        0
+      ]);
+
+  var imageNorm =
+    imageColumn
+      .arrayTranspose()
+      .matrixMultiply(
+        imageColumn
+      )
+      .arrayGet([
+        0,
+        0
+      ])
+      .sqrt();
+
+  var vectorNorm =
+    ee.Number(
+      vectorArray
+        .pow(2)
+        .reduce(
+          ee.Reducer.sum(),
+          [0]
+        )
+        .get([0])
+    )
+    .sqrt();
+
+  var denominator =
+    imageNorm
+      .multiply(
+        vectorNorm
+      )
+      .max(
+        1e-12
+      );
+
+  return dotProduct
+    .divide(
+      denominator
+    )
+    .clamp(
+      -1,
+      1
+    )
+    .rename(
+      name
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+}
+
+
+var farmSim =
+  similarityBand(
+    aef,
+    farmVector,
+    'farm_sim'
+  );
+
+var oceanSim =
+  similarityBand(
+    aef,
+    oceanVector,
+    'ocean_sim'
+  );
+
+var confSim =
+  similarityBand(
+    aef,
+    confVector,
+    'conf_sim'
+  );
+
+
+var marginOcean =
+  farmSim
+    .subtract(
+      oceanSim
+    )
+    .rename(
+      'margin_ocean'
+    );
+
+var marginConf =
+  farmSim
+    .subtract(
+      confSim
+    )
+    .rename(
+      'margin_conf'
+    );
+
+var marginBestNoise =
+  farmSim
+    .subtract(
+      oceanSim.max(
+        confSim
+      )
+    )
+    .rename(
+      'margin_best_noise'
+    );
+
+
+var allProtoBandsList =
+  allProtoColumns.map(
+    function(colName) {
+
+      colName =
+        ee.String(
+          colName
+        );
+
+      var protoVector =
+        ee.Array(
+          vectorsAll.aggregate_array(
+            colName
+          )
+        );
+
+      return similarityBand(
+        aef,
+        protoVector,
+        colName
+      );
+
+    }
+  );
+
+
+var allProtoImage =
+  ee.ImageCollection
+    .fromImages(
+      allProtoBandsList
+    )
+    .toBands()
+    .rename(
+      allProtoColumns
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+
+var completePredictorImage =
+  aef
+    .addBands(
+      farmSim
+    )
+    .addBands(
+      oceanSim
+    )
+    .addBands(
+      confSim
+    )
+    .addBands(
+      marginOcean
+    )
+    .addBands(
+      marginConf
+    )
+    .addBands(
+      marginBestNoise
+    )
+    .addBands(
+      allProtoImage
+    );
+
+
+var classSimilarityNames =
+  ee.List([
+    'farm_sim',
+    'ocean_sim',
+    'conf_sim'
+  ]);
+
+var marginNames =
+  ee.List([
+    'margin_ocean',
+    'margin_conf',
+    'margin_best_noise'
+  ]);
+
+var raw64Bands =
+  bandNames;
+
+var raw64ClassSimilarityBands =
+  bandNames
+    .cat(
+      classSimilarityNames
+    );
+
+var raw64ClassSimilarityMarginBands =
+  bandNames
+    .cat(
+      classSimilarityNames
+    )
+    .cat(
+      marginNames
+    );
+
+var finalCRRFBands =
+  bandNames
+    .cat(
+      classSimilarityNames
+    )
+    .cat(
+      marginNames
+    )
+    .cat(
+      allProtoColumns
+    );
+
+
+var finalCRRFPredictorCount =
+  finalCRRFBands
+    .size()
+    .getInfo();
+
+
+if (
+  finalCRRFPredictorCount !== 75
+) {
+
+  throw new Error(
+    'FEATURE QA FAILED: final CR-RF must contain 75 predictors; found ' +
+    finalCRRFPredictorCount
+  );
+
+}
+
+
+print(
+  'Final CR-RF predictor count:',
+  finalCRRFPredictorCount
+);
+
+print(
+  'Final CR-RF prototypes:',
+  allProtoNames
+);
+
+
+function trainRF(
+  inputBands
+) {
+
+  return ee.Classifier
+    .smileRandomForest({
+      numberOfTrees:
+        RF_NUMBER_OF_TREES,
+
+      variablesPerSplit:
+        RF_VARIABLES_PER_SPLIT,
+
+      minLeafPopulation:
+        RF_MIN_LEAF_POPULATION,
+
+      bagFraction:
+        RF_BAG_FRACTION,
+
+      seed:
+        RF_SEED
+    })
+    .train({
+      features:
+        train_data,
+
+      classProperty:
+        'class_id',
+
+      inputProperties:
+        inputBands
+    });
+
+}
+
+
+var rfcSRF =
+  trainRF(
+    raw64Bands
+  );
+
+var rfcClassSimilarity =
+  trainRF(
+    raw64ClassSimilarityBands
+  );
+
+var rfcMargins =
+  trainRF(
+    raw64ClassSimilarityMarginBands
+  );
+
+var rfcCRRF =
+  trainRF(
+    finalCRRFBands
+  );
+
+
+var srfRaw =
+  completePredictorImage
+    .classify(
+      rfcSRF
+    )
+    .eq(1);
+
+var classSimilarityRaw =
+  completePredictorImage
+    .classify(
+      rfcClassSimilarity
+    )
+    .eq(1);
+
+var marginsRaw =
+  completePredictorImage
+    .classify(
+      rfcMargins
+    )
+    .eq(1);
+
+var crrfRaw =
+  completePredictorImage
+    .classify(
+      rfcCRRF
+    )
+    .eq(1);
+
+
+var srfFinal =
+  applyMinimumConnectedPixels(
+    srfRaw,
+    'SRF'
+  );
+
+var classSimilarityFinal =
+  applyMinimumConnectedPixels(
+    classSimilarityRaw,
+    'RF_ClassSimilarity'
+  );
+
+var marginsFinal =
+  applyMinimumConnectedPixels(
+    marginsRaw,
+    'RF_ClassSimilarity_Margins'
+  );
+
+var crrfFinal =
+  applyMinimumConnectedPixels(
+    crrfRaw,
+    'CRRF'
+  );
+
+
+var cosineThreshold90 =
+  ee.Number(
+    COSINE_90
+  );
+
+var cosineThreshold95 =
+  ee.Number(
+    COSINE_95
+  );
+
+var cosineThreshold99 =
+  ee.Number(
+    COSINE_99
+  );
+
+var angularThreshold90 =
+  cosineThreshold90
+    .acos()
+    .multiply(
+      180 / Math.PI
+    );
+
+var angularThreshold95 =
+  cosineThreshold95
+    .acos()
+    .multiply(
+      180 / Math.PI
+    );
+
+var angularThreshold99 =
+  cosineThreshold99
+    .acos()
+    .multiply(
+      180 / Math.PI
+    );
+
+
+print(
+  'Frozen Tasmania cosine thresholds:',
+  {
+    retain_90:
+      COSINE_90,
+
+    retain_95:
+      COSINE_95,
+
+    retain_99:
+      COSINE_99
+  }
+);
+
+
+var cosineFinal90 =
+  applyMinimumConnectedPixels(
+    farmSim.gte(
+      cosineThreshold90
+    ),
+    'Cosine90'
+  );
+
+var cosineFinal95 =
+  applyMinimumConnectedPixels(
+    farmSim.gte(
+      cosineThreshold95
+    ),
+    'Cosine95'
+  );
+
+var cosineFinal99 =
+  applyMinimumConnectedPixels(
+    farmSim.gte(
+      cosineThreshold99
+    ),
+    'Cosine99'
+  );
+
+
+var evaluationBase =
+  ee.Image.constant(0)
+    .toByte()
+    .rename(
+      'base'
+    )
+    .clip(
+      scanningArea
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+var truth =
+  evaluationBase
+    .paint({
+      featureCollection:
+        groundTruth,
+
+      color:
+        1
+    })
+    .rename(
+      'truth'
+    )
+    .updateMask(
+      evaluationDomain
+    )
+    .toByte()
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+
+function safeGet(
+  dict,
+  key
+) {
+
+  dict =
+    ee.Dictionary(
+      dict
+    );
+
+  return ee.Number(
+    ee.Algorithms.If(
+      dict.contains(key),
+      dict.get(key),
+      0
+    )
+  );
+
+}
+
+
+function safeDivide(
+  num,
+  den
+) {
+
+  num =
+    ee.Number(num);
+
+  den =
+    ee.Number(den);
+
+  return ee.Number(
+    ee.Algorithms.If(
+      den.neq(0),
+      num.divide(den),
+      0
+    )
+  );
+
+}
+
+
+function pixelMetrics(
+  methodCode,
+  methodName,
+  pred,
+  analysisGroup
+) {
+
+  pred =
+    pred
+      .rename(
+        'prediction'
+      )
+      .clip(
+        scanningArea
+      )
+      .unmask(0)
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+  var truthBinary =
+    truth
+      .unmask(0)
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+  var tp =
+    pred
+      .eq(1)
+      .and(
+        truthBinary.eq(1)
+      )
+      .rename('TP')
+      .toInt();
+
+  var fp =
+    pred
+      .eq(1)
+      .and(
+        truthBinary.eq(0)
+      )
+      .rename('FP')
+      .toInt();
+
+  var fn =
+    pred
+      .eq(0)
+      .and(
+        truthBinary.eq(1)
+      )
+      .rename('FN')
+      .toInt();
+
+  var tn =
+    pred
+      .eq(0)
+      .and(
+        truthBinary.eq(0)
+      )
+      .rename('TN')
+      .toInt();
+
+  var countImage =
+    ee.Image.cat([
+      tp,
+      fp,
+      fn,
+      tn
+    ])
+    .updateMask(
+      evaluationDomain
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+  var counts =
+    countImage.reduceRegion({
+      reducer:
+        ee.Reducer
+          .sum()
+          .unweighted(),
+
+      geometry:
+        scanningArea,
+
+      scale:
+        SCALE,
+
+      crs:
+        AOI_CRS,
+
+      maxPixels:
+        1e13,
+
+      tileScale:
+        4
+    });
+
+  var TP =
+    safeGet(
+      counts,
+      'TP'
+    );
+
+  var FP =
+    safeGet(
+      counts,
+      'FP'
+    );
+
+  var FN =
+    safeGet(
+      counts,
+      'FN'
+    );
+
+  var TN =
+    safeGet(
+      counts,
+      'TN'
+    );
+
+  var totalPixels =
+    TP
+      .add(TN)
+      .add(FP)
+      .add(FN);
+
+  var precision =
+    safeDivide(
+      TP,
+      TP.add(FP)
+    );
+
+  var recall =
+    safeDivide(
+      TP,
+      TP.add(FN)
+    );
+
+  var f1 =
+    safeDivide(
+      TP.multiply(2),
+      TP.multiply(2)
+        .add(FP)
+        .add(FN)
+    );
+
+  var iou =
+    safeDivide(
+      TP,
+      TP
+        .add(FP)
+        .add(FN)
+    );
+
+  return ee.Feature(
+    null,
+    {
+      analysis_group:
+        analysisGroup,
+
+      method_code:
+        methodCode,
+
+      method:
+        methodName,
+
+      evaluated_pixels:
+        totalPixels,
+
+      TP_pixels:
+        TP,
+
+      TN_pixels:
+        TN,
+
+      FP_pixels:
+        FP,
+
+      FN_pixels:
+        FN,
+
+      precision:
+        precision,
+
+      recall:
+        recall,
+
+      F1:
+        f1,
+
+      IoU:
+        iou
+    }
+  );
+
+}
+
+
+var mainPixelResults =
+  ee.FeatureCollection([
+
+    pixelMetrics(
+      'COS90',
+      'Cosine 90% target retention',
+      cosineFinal90,
+      'main'
+    )
+    .set({
+      threshold_rule:
+        '2024 target 10th percentile / 90% target retention',
+
+      cosine_similarity_threshold:
+        cosineThreshold90,
+
+      angular_threshold_degrees:
+        angularThreshold90
+    }),
+
+    pixelMetrics(
+      'COS95',
+      'Cosine 95% target retention',
+      cosineFinal95,
+      'main'
+    )
+    .set({
+      threshold_rule:
+        '2024 target 5th percentile / 95% target retention',
+
+      cosine_similarity_threshold:
+        cosineThreshold95,
+
+      angular_threshold_degrees:
+        angularThreshold95
+    }),
+
+    pixelMetrics(
+      'COS99',
+      'Cosine 99% target retention',
+      cosineFinal99,
+      'main'
+    )
+    .set({
+      threshold_rule:
+        '2024 target 1st percentile / 99% target retention',
+
+      cosine_similarity_threshold:
+        cosineThreshold99,
+
+      angular_threshold_degrees:
+        angularThreshold99
+    }),
+
+    pixelMetrics(
+      'SRF',
+      'Standard Random Forest',
+      srfFinal,
+      'main'
+    ),
+
+    pixelMetrics(
+      'CRRF',
+      'Class-Relationship Random Forest',
+      crrfFinal,
+      'main'
+    )
+
+  ]);
+
+
+var ablationPixelResults =
+  ee.FeatureCollection([
+
+    pixelMetrics(
+      'Raw64',
+      'Raw64',
+      srfFinal,
+      'ablation'
+    ),
+
+    pixelMetrics(
+      'Raw64_ClassSimilarity',
+      'Raw64 + class similarities',
+      classSimilarityFinal,
+      'ablation'
+    ),
+
+    pixelMetrics(
+      'Raw64_ClassSimilarity_Margins',
+      'Raw64 + class similarities + margins',
+      marginsFinal,
+      'ablation'
+    ),
+
+    pixelMetrics(
+      'Raw64_ClassSimilarity_Margins_AllPrototypes',
+      'Raw64 + class similarities + margins + all five prototypes',
+      crrfFinal,
+      'ablation'
+    )
+
+  ]);
+
+
+function scoreObjects(
+  methodCode,
+  methodName,
+  pred,
+  analysisGroup
+) {
+
+  pred =
+    pred
+      .clip(
+        scanningArea
+      )
+      .unmask(0)
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+  return groundTruth.map(
+    function(f) {
+
+      var evalGeom =
+        f.geometry()
+          .intersection(
+            scanningArea,
+            1
+          );
+
+      var objectTruth =
+        ee.Image.constant(0)
+          .toByte()
+          .paint({
+            featureCollection:
+              ee.FeatureCollection([
+                ee.Feature(f)
+              ]),
+
+            color:
+              1
+          })
+          .rename(
+            'object_truth'
+          )
+          .clip(
+            scanningArea
+          )
+          .setDefaultProjection(
+            EVAL_PROJ
+          )
+          .updateMask(
+            evaluationDomain
+          );
+
+      var gtPixelsImage =
+        objectTruth
+          .eq(1)
+          .rename(
+            'gt_pixels'
+          )
+          .toInt();
+
+      var overlapPixelsImage =
+        pred
+          .eq(1)
+          .and(
+            objectTruth.eq(1)
+          )
+          .rename(
+            'overlap_pixels'
+          )
+          .toInt();
+
+      var objectCountImage =
+        ee.Image.cat([
+          gtPixelsImage,
+          overlapPixelsImage
+        ])
+        .updateMask(
+          evaluationDomain
+        )
+        .setDefaultProjection(
+          EVAL_PROJ
+        );
+
+      var objectCounts =
+        objectCountImage.reduceRegion({
+          reducer:
+            ee.Reducer
+              .sum()
+              .unweighted(),
+
+          geometry:
+            evalGeom,
+
+          scale:
+            SCALE,
+
+          crs:
+            AOI_CRS,
+
+          maxPixels:
+            1e10,
+
+          tileScale:
+            4
+        });
+
+      var gtPixels =
+        safeGet(
+          objectCounts,
+          'gt_pixels'
+        );
+
+      var overlapPixels =
+        safeGet(
+          objectCounts,
+          'overlap_pixels'
+        );
+
+      var gtArea =
+        gtPixels.multiply(
+          SCALE * SCALE
+        );
+
+      var overlapArea =
+        overlapPixels.multiply(
+          SCALE * SCALE
+        );
+
+      var overlapFraction =
+        safeDivide(
+          overlapPixels,
+          gtPixels
+        );
+
+      var evaluable =
+        ee.Number(
+          ee.Algorithms.If(
+            gtPixels.gt(0),
+            1,
+            0
+          )
+        );
+
+      var detectedAny =
+        ee.Number(
+          ee.Algorithms.If(
+            overlapPixels.gt(0),
+            1,
+            0
+          )
+        );
+
+      var detected10 =
+        ee.Number(
+          ee.Algorithms.If(
+            overlapFraction.gte(0.10),
+            1,
+            0
+          )
+        );
+
+      var detected25 =
+        ee.Number(
+          ee.Algorithms.If(
+            overlapFraction.gte(0.25),
+            1,
+            0
+          )
+        );
+
+      return f.set({
+        analysis_group:
+          analysisGroup,
+
+        method_code:
+          methodCode,
+
+        method:
+          methodName,
+
+        evaluable_object:
+          evaluable,
+
+        evaluable_gt_pixels:
+          gtPixels,
+
+        overlap_pixels:
+          overlapPixels,
+
+        evaluable_gt_area_m2:
+          gtArea,
+
+        overlap_area_m2:
+          overlapArea,
+
+        pred_area_inside_m2:
+          overlapArea,
+
+        overlap_fraction:
+          overlapFraction,
+
+        detected_any:
+          detectedAny,
+
+        detected_10pct:
+          detected10,
+
+        detected_25pct:
+          detected25
+      });
+
+    }
+  );
+
+}
+
+
+function summariseObjectSubset(
+  scored,
+  methodCode,
+  methodName,
+  analysisGroup,
+  objectType,
+  useAllObjects
+) {
+
+  var totalSubset =
+    ee.FeatureCollection(
+      ee.Algorithms.If(
+        useAllObjects,
+        scored,
+        scored.filter(
+          ee.Filter.eq(
+            'object_type',
+            objectType
+          )
+        )
+      )
+    );
+
+  var evaluableSubset =
+    totalSubset.filter(
+      ee.Filter.eq(
+        'evaluable_object',
+        1
+      )
+    );
+
+  var nTotal =
+    totalSubset.size();
+
+  var nEvaluable =
+    evaluableSubset.size();
+
+  var detectedAny =
+    ee.Number(
+      evaluableSubset.aggregate_sum(
+        'detected_any'
+      )
+    );
+
+  var detected10 =
+    ee.Number(
+      evaluableSubset.aggregate_sum(
+        'detected_10pct'
+      )
+    );
+
+  var detected25 =
+    ee.Number(
+      evaluableSubset.aggregate_sum(
+        'detected_25pct'
+      )
+    );
+
+  var meanOverlap =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvaluable.gt(0),
+        evaluableSubset.aggregate_mean(
+          'overlap_fraction'
+        ),
+        0
+      )
+    );
+
+  var maxOverlap =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvaluable.gt(0),
+        evaluableSubset.aggregate_max(
+          'overlap_fraction'
+        ),
+        0
+      )
+    );
+
+  return ee.Feature(
+    null,
+    {
+      analysis_group:
+        analysisGroup,
+
+      method_code:
+        methodCode,
+
+      method:
+        methodName,
+
+      object_type:
+        objectType,
+
+      n_objects_total:
+        nTotal,
+
+      n_objects_evaluable:
+        nEvaluable,
+
+      n_objects_excluded:
+        nTotal.subtract(
+          nEvaluable
+        ),
+
+      detected_any:
+        detectedAny,
+
+      detected_any_rate:
+        safeDivide(
+          detectedAny,
+          nEvaluable
+        ),
+
+      detected_10pct:
+        detected10,
+
+      detected_10pct_rate:
+        safeDivide(
+          detected10,
+          nEvaluable
+        ),
+
+      detected_25pct:
+        detected25,
+
+      detected_25pct_rate:
+        safeDivide(
+          detected25,
+          nEvaluable
+        ),
+
+      mean_overlap_fraction:
+        meanOverlap,
+
+      max_overlap_fraction:
+        maxOverlap
+    }
+  );
+
+}
+
+
+function objectSummary(
+  methodCode,
+  methodName,
+  pred,
+  analysisGroup
+) {
+
+  var scored =
+    scoreObjects(
+      methodCode,
+      methodName,
+      pred,
+      analysisGroup
+    );
+
+  var objectTypes =
+    ee.List(
+      groundTruth.aggregate_array(
+        'object_type'
+      )
+    )
+    .distinct()
+    .sort();
+
+  var typedSummaries =
+    ee.FeatureCollection(
+      objectTypes.map(
+        function(objectType) {
+
+          objectType =
+            ee.String(
+              objectType
+            );
+
+          return summariseObjectSubset(
+            scored,
+            methodCode,
+            methodName,
+            analysisGroup,
+            objectType,
+            false
+          );
+
+        }
+      )
+    );
+
+  var allSummary =
+    ee.FeatureCollection([
+      summariseObjectSubset(
+        scored,
+        methodCode,
+        methodName,
+        analysisGroup,
+        'all',
+        true
+      )
+    ]);
+
+  return typedSummaries.merge(
+    allSummary
+  );
+
+}
+
+
+var mainObjectResults =
+  objectSummary(
+    'COS90',
+    'Cosine 90% target retention',
+    cosineFinal90,
+    'main'
+  )
+  .merge(
+    objectSummary(
+      'COS95',
+      'Cosine 95% target retention',
+      cosineFinal95,
+      'main'
+    )
+  )
+  .merge(
+    objectSummary(
+      'COS99',
+      'Cosine 99% target retention',
+      cosineFinal99,
+      'main'
+    )
+  )
+  .merge(
+    objectSummary(
+      'SRF',
+      'Standard Random Forest',
+      srfFinal,
+      'main'
+    )
+  )
+  .merge(
+    objectSummary(
+      'CRRF',
+      'Class-Relationship Random Forest',
+      crrfFinal,
+      'main'
+    )
+  );
+
+
+var mainObjectDetails =
+  scoreObjects(
+    'COS90',
+    'Cosine 90% target retention',
+    cosineFinal90,
+    'main'
+  )
+  .merge(
+    scoreObjects(
+      'COS95',
+      'Cosine 95% target retention',
+      cosineFinal95,
+      'main'
+    )
+  )
+  .merge(
+    scoreObjects(
+      'COS99',
+      'Cosine 99% target retention',
+      cosineFinal99,
+      'main'
+    )
+  )
+  .merge(
+    scoreObjects(
+      'SRF',
+      'Standard Random Forest',
+      srfFinal,
+      'main'
+    )
+  )
+  .merge(
+    scoreObjects(
+      'CRRF',
+      'Class-Relationship Random Forest',
+      crrfFinal,
+      'main'
+    )
+  );
+
+
+var ablationObjectResults =
+  objectSummary(
+    'Raw64',
+    'Raw64',
+    srfFinal,
+    'ablation'
+  )
+  .merge(
+    objectSummary(
+      'Raw64_ClassSimilarity',
+      'Raw64 + class similarities',
+      classSimilarityFinal,
+      'ablation'
+    )
+  )
+  .merge(
+    objectSummary(
+      'Raw64_ClassSimilarity_Margins',
+      'Raw64 + class similarities + margins',
+      marginsFinal,
+      'ablation'
+    )
+  )
+  .merge(
+    objectSummary(
+      'Raw64_ClassSimilarity_Margins_AllPrototypes',
+      'Raw64 + class similarities + margins + all five prototypes',
+      crrfFinal,
+      'ablation'
+    )
+  );
+
+
+var ablationObjectDetails =
+  scoreObjects(
+    'Raw64',
+    'Raw64',
+    srfFinal,
+    'ablation'
+  )
+  .merge(
+    scoreObjects(
+      'Raw64_ClassSimilarity',
+      'Raw64 + class similarities',
+      classSimilarityFinal,
+      'ablation'
+    )
+  )
+  .merge(
+    scoreObjects(
+      'Raw64_ClassSimilarity_Margins',
+      'Raw64 + class similarities + margins',
+      marginsFinal,
+      'ablation'
+    )
+  )
+  .merge(
+    scoreObjects(
+      'Raw64_ClassSimilarity_Margins_AllPrototypes',
+      'Raw64 + class similarities + margins + all five prototypes',
+      crrfFinal,
+      'ablation'
+    )
+  );
+
+
+function addRunMetadata(
+  f
+) {
+
+  return ee.Feature(f)
+    .set({
+      region:
+        REGION,
+
+      development_year:
+        DEVELOPMENT_YEAR,
+
+      evaluation_year:
+        YEAR,
+
+      evaluation_design:
+        'spatiotemporally held-out',
+
+      development_sampling_crs:
+        AOI_CRS,
+
+      development_aoi_overlap_count:
+        0,
+
+      scale_m:
+        SCALE,
+
+      aoi_size_km:
+        AOI_SIZE_M / 1000,
+
+      aoi_crs:
+        AOI_CRS,
+
+      land_water_mask:
+        'ESA WorldCover 2021 class 80',
+
+      similarity_definition:
+        'true cosine similarity',
+
+      pixel_counting:
+        'unweighted 10 m pixel counts',
+
+      object_overlap_definition:
+        'predicted positive AND individual object truth / individual object truth',
+
+      minimum_connected_pixels:
+        MIN_CONNECTED_PIXELS,
+
+      rf_number_of_trees:
+        RF_NUMBER_OF_TREES,
+
+      rf_variables_per_split:
+        RF_VARIABLES_PER_SPLIT,
+
+      rf_min_leaf_population:
+        RF_MIN_LEAF_POPULATION,
+
+      rf_bag_fraction:
+        RF_BAG_FRACTION,
+
+      rf_seed:
+        RF_SEED,
+
+      all_prototypes:
+        allProtoNames.join(';'),
+
+      evaluation_aef_utm_zones:
+        evaluationAEFUTMZones,
+
+      evaluation_aef_dataset_versions:
+        evaluationAEFDatasetVersions,
+
+      evaluation_aef_model_versions:
+        evaluationAEFModelVersions,
+
+      evaluation_aef_processing_versions:
+        evaluationAEFProcessingVersions
+    });
+
+}
+
+
+mainPixelResults =
+  mainPixelResults.map(
+    addRunMetadata
+  );
+
+ablationPixelResults =
+  ablationPixelResults.map(
+    addRunMetadata
+  );
+
+mainObjectResults =
+  mainObjectResults.map(
+    addRunMetadata
+  );
+
+mainObjectDetails =
+  mainObjectDetails.map(
+    addRunMetadata
+  );
+
+ablationObjectResults =
+  ablationObjectResults.map(
+    addRunMetadata
+  );
+
+ablationObjectDetails =
+  ablationObjectDetails.map(
+    addRunMetadata
+  );
+
+
+function importanceCollection(
+  methodCode,
+  methodName,
+  classifier
+) {
+
+  var importance =
+    ee.Dictionary(
+      classifier
+        .explain()
+        .get(
+          'importance'
+        )
+    );
+
+  return ee.FeatureCollection(
+    importance
+      .keys()
+      .sort()
+      .map(
+        function(featureName) {
+
+          featureName =
+            ee.String(
+              featureName
+            );
+
+          return ee.Feature(
+            null,
+            {
+              method_code:
+                methodCode,
+
+              method:
+                methodName,
+
+              feature:
+                featureName,
+
+              importance:
+                importance.get(
+                  featureName
+                )
+            }
+          );
+
+        }
+      )
+  );
+
+}
+
+
+var featureImportanceResults =
+  importanceCollection(
+    'Raw64',
+    'Raw64 / Standard Random Forest',
+    rfcSRF
+  )
+  .merge(
+    importanceCollection(
+      'Raw64_ClassSimilarity',
+      'Raw64 + class similarities',
+      rfcClassSimilarity
+    )
+  )
+  .merge(
+    importanceCollection(
+      'Raw64_ClassSimilarity_Margins',
+      'Raw64 + class similarities + margins',
+      rfcMargins
+    )
+  )
+  .merge(
+    importanceCollection(
+      'Raw64_ClassSimilarity_Margins_AllPrototypes',
+      'Final CR-RF: Raw64 + class similarities + margins + all five prototypes',
+      rfcCRRF
+    )
+  )
+  .map(
+    addRunMetadata
+  );
+
+
+var runManifest =
+  ee.FeatureCollection([
+    ee.Feature(
+      null,
+      {
+        region:
+          REGION,
+
+        development_year:
+          DEVELOPMENT_YEAR,
+
+        evaluation_year:
+          YEAR,
+
+        evaluation_design:
+          'spatiotemporally held-out',
+
+        aoi_centre_longitude:
+          centreLonLat.get(0),
+
+        aoi_centre_latitude:
+          centreLonLat.get(1),
+
+        aoi_size_m:
+          AOI_SIZE_M,
+
+        aoi_crs:
+          AOI_CRS,
+
+        development_sampling_crs:
+          AOI_CRS,
+
+        development_aoi_overlap_count:
+          0,
+
+        scale_m:
+          SCALE,
+
+        target_training_sites:
+          developmentTargetSites,
+
+        ocean_training_sites:
+          developmentOceanSites,
+
+        confounding_training_sites:
+          developmentConfoundingSites,
+
+        all_prototypes:
+          allProtoNames.join(';'),
+
+        cosine_threshold_90:
+          COSINE_90,
+
+        cosine_threshold_95:
+          COSINE_95,
+
+        cosine_threshold_99:
+          COSINE_99,
+
+        similarity_definition:
+          'true cosine similarity',
+
+        rf_number_of_trees:
+          RF_NUMBER_OF_TREES,
+
+        rf_variables_per_split:
+          RF_VARIABLES_PER_SPLIT,
+
+        rf_min_leaf_population:
+          RF_MIN_LEAF_POPULATION,
+
+        rf_bag_fraction:
+          RF_BAG_FRACTION,
+
+        rf_seed:
+          RF_SEED,
+
+        minimum_connected_pixels:
+          MIN_CONNECTED_PIXELS,
+
+        pixel_counting:
+          'unweighted 10 m pixel counts',
+
+        object_overlap_definition:
+          'predicted positive AND individual object truth / individual object truth',
+
+        land_water_mask:
+          'ESA WorldCover 2021 class 80',
+
+        ground_truth_objects:
+          groundTruth.size(),
+
+        ground_truth_polygon_objects:
+          groundTruth
+            .filter(
+              ee.Filter.eq(
+                'object_type',
+                'polygon'
+              )
+            )
+            .size(),
+
+        ground_truth_radial_objects:
+          groundTruth
+            .filter(
+              ee.Filter.eq(
+                'object_type',
+                'radial'
+              )
+            )
+            .size(),
+
+        evaluation_aef_tile_count:
+          evaluationAEFTileCount,
+
+        evaluation_aef_utm_zones:
+          evaluationAEFUTMZones,
+
+        evaluation_aef_dataset_versions:
+          evaluationAEFDatasetVersions,
+
+        evaluation_aef_model_versions:
+          evaluationAEFModelVersions,
+
+        evaluation_aef_processing_versions:
+          evaluationAEFProcessingVersions
+      }
+    )
+  ]);
+
+
+print(
+  'Ground-truth object counts:',
+  groundTruth.aggregate_histogram(
+    'object_type'
+  )
+);
+
+print(
+  'MAIN PIXEL RESULTS:',
+  mainPixelResults
+);
+
+print(
+  'MAIN OBJECT RESULTS:',
+  mainObjectResults
+);
+
+print(
+  'ABLATION PIXEL RESULTS:',
+  ablationPixelResults
+);
+
+print(
+  'ABLATION OBJECT RESULTS:',
+  ablationObjectResults
+);
+
+print(
+  'RUN MANIFEST:',
+  runManifest
+);
+
+
+if (
+  EXPORT_TABLES
+) {
+
+  Export.table.toDrive({
+    collection:
+      mainPixelResults,
+
+    description:
+      'Tasmania_2025_main_pixel_metrics',
+
+    fileNamePrefix:
+      'Tasmania_2025_main_pixel_metrics',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      mainObjectResults,
+
+    description:
+      'Tasmania_2025_main_object_summary',
+
+    fileNamePrefix:
+      'Tasmania_2025_main_object_summary',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      mainObjectDetails,
+
+    description:
+      'Tasmania_2025_main_object_details',
+
+    fileNamePrefix:
+      'Tasmania_2025_main_object_details',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      ablationPixelResults,
+
+    description:
+      'Tasmania_2025_ablation_pixel_metrics',
+
+    fileNamePrefix:
+      'Tasmania_2025_ablation_pixel_metrics',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      ablationObjectResults,
+
+    description:
+      'Tasmania_2025_ablation_object_summary',
+
+    fileNamePrefix:
+      'Tasmania_2025_ablation_object_summary',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      ablationObjectDetails,
+
+    description:
+      'Tasmania_2025_ablation_object_details',
+
+    fileNamePrefix:
+      'Tasmania_2025_ablation_object_details',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      featureImportanceResults,
+
+    description:
+      'Tasmania_2025_RF_feature_importance',
+
+    fileNamePrefix:
+      'Tasmania_2025_RF_feature_importance',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      runManifest,
+
+    description:
+      'Tasmania_2025_run_manifest',
+
+    fileNamePrefix:
+      'Tasmania_2025_run_manifest',
+
+    fileFormat:
+      'CSV'
+  });
+
+
+  Export.table.toDrive({
+    collection:
+      groundTruth,
+
+    description:
+      'Tasmania_2025_ground_truth',
+
+    fileNamePrefix:
+      'Tasmania_2025_ground_truth',
+
+    fileFormat:
+      'GeoJSON'
+  });
+
+}
+
+
+var predictionStack =
+  ee.Image.cat([
+
+    evaluationDomain
+      .rename(
+        'marine_mask'
+      )
+      .toByte(),
+
+    truth
+      .unmask(0)
+      .rename(
+        'truth'
+      )
+      .toByte(),
+
+    cosineFinal90
+      .rename(
+        'cosine_90'
+      ),
+
+    cosineFinal95
+      .rename(
+        'cosine_95'
+      ),
+
+    cosineFinal99
+      .rename(
+        'cosine_99'
+      ),
+
+    srfFinal
+      .rename(
+        'SRF'
+      ),
+
+    classSimilarityFinal
+      .rename(
+        'class_similarity'
+      ),
+
+    marginsFinal
+      .rename(
+        'class_similarity_margins'
+      ),
+
+    crrfFinal
+      .rename(
+        'CRRF'
+      )
+
+  ])
+  .toByte()
+  .clip(
+    scanningArea
+  )
+  .setDefaultProjection(
+    EVAL_PROJ
+  );
+
+
+if (
+  EXPORT_PREDICTION_STACK
+) {
+
+  Export.image.toDrive({
+    image:
+      predictionStack,
+
+    description:
+      'Tasmania_2025_final_prediction_stack',
+
+    fileNamePrefix:
+      'Tasmania_2025_final_prediction_stack',
+
+    region:
+      scanningArea,
+
+    scale:
+      SCALE,
+
+    crs:
+      AOI_CRS,
+
+    maxPixels:
+      1e13,
+
+    fileFormat:
+      'GeoTIFF'
+  });
+
+}
+
+
+Map.centerObject(
+  scanningArea,
+  10
+);
+
+
+var scanningOutline =
+  ee.Image()
+    .byte()
+    .paint({
+      featureCollection:
+        ee.FeatureCollection([
+          ee.Feature(
+            scanningArea
+          )
+        ]),
+
+      color:
+        1,
+
+      width:
+        3
+    });
+
+
+Map.addLayer(
+  scanningOutline,
+  {
+    palette: [
+      'red'
+    ]
+  },
+  'Standardised 30 km x 30 km AOI',
+  true
+);
+
+
+Map.addLayer(
+  AOI_Area,
+  {
+    color:
+      'red'
+  },
+  'AOI centre',
+  true
+);
+
+
+var annualSAR =
+  ee.ImageCollection(
+    'COPERNICUS/S1_GRD'
+  )
+  .filterBounds(
+    scanningArea
+  )
+  .filterDate(
+    YEAR + '-01-01',
+    (YEAR + 1) + '-01-01'
+  )
+  .filter(
+    ee.Filter.listContains(
+      'transmitterReceiverPolarisation',
+      'VV'
+    )
+  )
+  .select(
+    'VV'
+  )
+  .median()
+  .clip(
+    scanningArea
+  );
+
+
+Map.addLayer(
+  annualSAR,
+  {
+    min:
+      -20,
+
+    max:
+      0
+  },
+  'S1 Annual VV',
+  false
+);
+
+
+Map.addLayer(
+  aef.select([
+    'A00',
+    'A01',
+    'A02'
+  ]),
+  {
+    min:
+      -0.2,
+
+    max:
+      0.2
+  },
+  'AEF Preview',
+  false
+);
+
+
+Map.addLayer(
+  evaluationDomain
+    .selfMask(),
+  {
+    palette: [
+      '0064c8'
+    ]
+  },
+  'ESA WorldCover permanent water',
+  false
+);
+
+
+Map.addLayer(
+  cosineFinal90
+    .selfMask(),
+  {
+    palette: [
+      'ffcc00'
+    ]
+  },
+  'Cosine 90% target retention',
+  false
+);
+
+
+Map.addLayer(
+  cosineFinal95
+    .selfMask(),
+  {
+    palette: [
+      'ff9900'
+    ]
+  },
+  'Cosine 95% target retention',
+  false
+);
+
+
+Map.addLayer(
+  cosineFinal99
+    .selfMask(),
+  {
+    palette: [
+      'ffff00'
+    ]
+  },
+  'Cosine 99% target retention',
+  false
+);
+
+
+Map.addLayer(
+  srfFinal
+    .selfMask(),
+  {
+    palette: [
+      'red'
+    ]
+  },
+  'Standard RF',
+  true
+);
+
+
+Map.addLayer(
+  crrfFinal
+    .selfMask(),
+  {
+    palette: [
+      'cyan'
+    ]
+  },
+  'Class-Relationship RF',
+  true
+);
+
+
+Map.addLayer(
+  classSimilarityFinal
+    .selfMask(),
+  {},
+  'Ablation - class similarities',
+  false
+);
+
+
+Map.addLayer(
+  marginsFinal
+    .selfMask(),
+  {},
+  'Ablation - class similarities + margins',
+  false
+);
+
+
+var gtOutline =
+  ee.Image()
+    .byte()
+    .paint({
+      featureCollection:
+        groundTruth,
+
+      color:
+        1,
+
+      width:
+        2
+    });
+
+
+Map.addLayer(
+  gtOutline,
+  {
+    palette: [
+      'blue'
+    ]
+  },
+  'Ground truth footprint',
+  true
+);
+
+
+var gtPolygonOutline =
+  ee.Image()
+    .byte()
+    .paint({
+      featureCollection:
+        groundTruth.filter(
+          ee.Filter.eq(
+            'object_type',
+            'polygon'
+          )
+        ),
+
+      color:
+        1,
+
+      width:
+        2
+    });
+
+
+Map.addLayer(
+  gtPolygonOutline,
+  {
+    palette: [
+      'orange'
+    ]
+  },
+  'Ground truth polygons',
+  false
+);
+
+
+var gtRadialOutline =
+  ee.Image()
+    .byte()
+    .paint({
+      featureCollection:
+        groundTruth.filter(
+          ee.Filter.eq(
+            'object_type',
+            'radial'
+          )
+        ),
+
+      color:
+        1,
+
+      width:
+        2
+    });
+
+
+Map.addLayer(
+  gtRadialOutline,
+  {
+    palette: [
+      'magenta'
+    ]
+  },
+  'Ground truth radial buffers',
+  false
+);
+
+
+Map.addLayer(
+  ground_truth_radial,
+  {
+    color:
+      'white'
+  },
+  'Original radial cage markers',
+  false
+);
+
+
+Map.addLayer(
+  truth
+    .selfMask(),
+  {
+    palette: [
+      'lime'
+    ]
+  },
+  'Truth raster',
+  false
+);
+
+
+Map.addLayer(
+  developmentSiteFeatures,
+  {
+    color:
+      'purple'
+  },
+  '2024 development footprints QA',
+  false
+);
+
+
+print('=================================================');
+print('FINAL TASMANIA RUN CONFIGURATION');
+print('=================================================');
+
+print(
+  '2024 final CR-RF prototypes:',
+  allProtoNames
+);
+
+print(
+  '2024 cosine 90% threshold:',
+  COSINE_90
+);
+
+print(
+  '2024 cosine 95% threshold:',
+  COSINE_95
+);
+
+print(
+  '2024 cosine 99% threshold:',
+  COSINE_99
+);
+
+print(
+  'Similarity:',
+  'true cosine similarity'
+);
+
+print(
+  'Pixel counting:',
+  'unweighted integer 10 m pixels'
+);
+
+print(
+  'Object overlap:',
+  'prediction ∩ individual object truth'
+);
+
+print(
+  'Development/AOI intersections:',
+  overlappingDevelopmentIDs.length
+);
+
+print(
+  'RF trees:',
+  RF_NUMBER_OF_TREES
+);
+
+print(
+  'RF variables per split:',
+  RF_VARIABLES_PER_SPLIT
+);
+
+print(
+  'RF minimum leaf population:',
+  RF_MIN_LEAF_POPULATION
+);
+
+print(
+  'RF bag fraction:',
+  RF_BAG_FRACTION
+);
+
+print(
+  'RF seed:',
+  RF_SEED
+);
+
+print(
+  'Minimum connected pixels:',
+  MIN_CONNECTED_PIXELS
+);
+
+print(
+  '2025 AEF source UTM zones:',
+  evaluationAEFUTMZones
+);
+
+print('=================================================');
+print('TASMANIA FINAL HELD-OUT EVALUATION READY');
+print('=================================================');
+
+
+var figureBackground =
+  annualSAR.visualize({
+    min: -20,
+    max: 0,
+    palette: [
+      '000000',
+      'ffffff'
+    ]
+  });
+
+
+var figureGTOverlay =
+  ee.Image()
+    .byte()
+    .paint({
+      featureCollection:
+        groundTruth,
+
+      color:
+        1,
+
+      width:
+        2
+    })
+    .selfMask()
+    .visualize({
+      palette: [
+        '0000ff'
+      ]
+    });
+
+
+var figureCos90Overlay =
+  cosineFinal90
+    .selfMask()
+    .visualize({
+      palette: [
+        'ffcc00'
+      ]
+    });
+
+
+var figureSRFOverlay =
+  srfFinal
+    .selfMask()
+    .visualize({
+      palette: [
+        'ff0000'
+      ]
+    });
+
+
+var figureCRRFOverlay =
+  crrfFinal
+    .selfMask()
+    .visualize({
+      palette: [
+        '00ffff'
+      ]
+    });
+
+
+var figurePanelGT =
+  figureBackground
+    .blend(
+      figureGTOverlay
+    )
+    .clip(
+      scanningArea
+    );
+
+
+var figurePanelCos90 =
+  figureBackground
+    .blend(
+      figureCos90Overlay
+    )
+    .clip(
+      scanningArea
+    );
+
+
+var figurePanelSRF =
+  figureBackground
+    .blend(
+      figureSRFOverlay
+    )
+    .clip(
+      scanningArea
+    );
+
+
+var figurePanelCRRF =
+  figureBackground
+    .blend(
+      figureCRRFOverlay
+    )
+    .clip(
+      scanningArea
+    );
+
+
+function exportFigurePanel(
+  image,
+  exportName
+) {
+
+  Export.image.toDrive({
+    image:
+      image,
+
+    description:
+      exportName,
+
+    fileNamePrefix:
+      exportName,
+
+    folder:
+      'GEE_Figure_Exports',
+
+    region:
+      scanningArea,
+
+    scale:
+      SCALE,
+
+    crs:
+      AOI_CRS,
+
+    maxPixels:
+      1e13,
+
+    fileFormat:
+      'GeoTIFF',
+
+    formatOptions: {
+      cloudOptimized:
+        true
+    }
+
+  });
+
+}
+
+
+exportFigurePanel(
+  figurePanelGT,
+  'Tasmania_2025_Figure_A_GroundTruth'
+);
+
+exportFigurePanel(
+  figurePanelCos90,
+  'Tasmania_2025_Figure_B_Cosine90'
+);
+
+exportFigurePanel(
+  figurePanelSRF,
+  'Tasmania_2025_Figure_C_SRF'
+);
+
+exportFigurePanel(
+  figurePanelCRRF,
+  'Tasmania_2025_Figure_D_CRRF'
+);
+
+
+print(
+  'Four Tasmania figure-panel export tasks created.'
+);
+
+print(
+  'Output CRS:',
+  AOI_CRS
+);
+
+print(
+  'Output scale:',
+  SCALE,
+  'm'
+);
+
+print(
+  'Expected panel dimensions: approximately 3000 x 3000 pixels.'
+);
+
+
+var FOOTPRINT_SCENARIOS = [
+
+  {
+    name:
+      'contracted',
+
+    radial_radius_m:
+      40,
+
+    polygon_buffer_m:
+      -10
+  },
+
+  {
+    name:
+      'nominal',
+
+    radial_radius_m:
+      50,
+
+    polygon_buffer_m:
+      0
+  },
+
+  {
+    name:
+      'expanded',
+
+    radial_radius_m:
+      60,
+
+    polygon_buffer_m:
+      10
+  }
+
+];
+
+
+var FOOTPRINT_SENSITIVITY_EXPORT_FOLDER =
+  'GEE_Sensitivity_Exports';
+
+
+function buildFootprintSensitivityGroundTruth(
+  scenarioName,
+  radialRadiusM,
+  polygonBufferM
+) {
+
+  radialRadiusM =
+    ee.Number(
+      radialRadiusM
+    );
+
+  polygonBufferM =
+    ee.Number(
+      polygonBufferM
+    );
+
+
+  var polygons =
+    ground_truth_poly.map(
+      function(f) {
+
+        var originalGeom =
+          f.geometry();
+
+        var sensitivityGeom =
+          ee.Geometry(
+            ee.Algorithms.If(
+              polygonBufferM.eq(0),
+              originalGeom,
+              originalGeom.buffer(
+                polygonBufferM,
+                1
+              )
+            )
+          );
+
+        var sensitivityArea =
+          sensitivityGeom.area(
+            1
+          );
+
+        return ee.Feature(
+          sensitivityGeom,
+          f.toDictionary()
+        )
+        .set({
+          object_type:
+            'polygon',
+
+          radius_m:
+            0,
+
+          sensitivity_scenario:
+            scenarioName,
+
+          polygon_buffer_m:
+            polygonBufferM,
+
+          radial_radius_m:
+            0,
+
+          sensitivity_area_m2:
+            sensitivityArea,
+
+          collapsed_polygon:
+            ee.Number(
+              ee.Algorithms.If(
+                sensitivityArea.gt(
+                  0
+                ),
+                0,
+                1
+              )
+            )
+        });
+
+      }
+    );
+
+
+  var radials =
+    ground_truth_radial.map(
+      function(f) {
+
+        var sensitivityGeom =
+          f.geometry()
+            .buffer(
+              radialRadiusM,
+              1
+            );
+
+        return ee.Feature(
+          sensitivityGeom,
+          f.toDictionary()
+        )
+        .set({
+          object_type:
+            'radial',
+
+          radius_m:
+            radialRadiusM,
+
+          sensitivity_scenario:
+            scenarioName,
+
+          polygon_buffer_m:
+            0,
+
+          radial_radius_m:
+            radialRadiusM,
+
+          sensitivity_area_m2:
+            sensitivityGeom.area(
+              1
+            ),
+
+          collapsed_polygon:
+            0
+        });
+
+      }
+    );
+
+
+  var combined =
+    polygons
+      .merge(
+        radials
+      )
+      .filterBounds(
+        scanningArea
+      );
+
+
+  var combinedList =
+    combined.toList(
+      combined.size()
+    );
+
+  var combinedIndex =
+    ee.List.sequence(
+      0,
+      combined
+        .size()
+        .subtract(
+          1
+        )
+    );
+
+
+  return ee.FeatureCollection(
+    combinedIndex.map(
+      function(i) {
+
+        i =
+          ee.Number(
+            i
+          );
+
+        var f =
+          ee.Feature(
+            combinedList.get(
+              i
+            )
+          );
+
+        var objectType =
+          ee.String(
+            f.get(
+              'object_type'
+            )
+          );
+
+        var validationID =
+          objectType
+            .cat(
+              '_'
+            )
+            .cat(
+              i
+                .add(
+                  1
+                )
+                .format(
+                  '%03d'
+                )
+            );
+
+        return f.set(
+          'validation_id',
+          validationID
+        );
+
+      }
+    )
+  );
+
+}
+
+
+function buildFootprintSensitivityTruthRaster(
+  sensitivityGT
+) {
+
+  return evaluationBase
+    .paint({
+      featureCollection:
+        sensitivityGT,
+
+      color:
+        1
+    })
+    .rename(
+      'truth'
+    )
+    .updateMask(
+      evaluationDomain
+    )
+    .toByte()
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+}
+
+
+function footprintSensitivityPixelMetrics(
+  scenarioName,
+  radialRadiusM,
+  polygonBufferM,
+  methodCode,
+  methodName,
+  pred,
+  sensitivityTruth
+) {
+
+  pred =
+    pred
+      .rename(
+        'prediction'
+      )
+      .clip(
+        scanningArea
+      )
+      .unmask(
+        0
+      )
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+  var truthBinary =
+    sensitivityTruth
+      .unmask(
+        0
+      )
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+  var tp =
+    pred
+      .eq(
+        1
+      )
+      .and(
+        truthBinary.eq(
+          1
+        )
+      )
+      .rename(
+        'TP'
+      )
+      .toInt();
+
+  var fp =
+    pred
+      .eq(
+        1
+      )
+      .and(
+        truthBinary.eq(
+          0
+        )
+      )
+      .rename(
+        'FP'
+      )
+      .toInt();
+
+  var fn =
+    pred
+      .eq(
+        0
+      )
+      .and(
+        truthBinary.eq(
+          1
+        )
+      )
+      .rename(
+        'FN'
+      )
+      .toInt();
+
+  var tn =
+    pred
+      .eq(
+        0
+      )
+      .and(
+        truthBinary.eq(
+          0
+        )
+      )
+      .rename(
+        'TN'
+      )
+      .toInt();
+
+  var countImage =
+    ee.Image.cat([
+      tp,
+      fp,
+      fn,
+      tn
+    ])
+    .updateMask(
+      evaluationDomain
+    )
+    .setDefaultProjection(
+      EVAL_PROJ
+    );
+
+  var counts =
+    countImage.reduceRegion({
+      reducer:
+        ee.Reducer
+          .sum()
+          .unweighted(),
+
+      geometry:
+        scanningArea,
+
+      scale:
+        SCALE,
+
+      crs:
+        AOI_CRS,
+
+      maxPixels:
+        1e13,
+
+      tileScale:
+        4
+    });
+
+
+  var TP =
+    safeGet(
+      counts,
+      'TP'
+    );
+
+  var FP =
+    safeGet(
+      counts,
+      'FP'
+    );
+
+  var FN =
+    safeGet(
+      counts,
+      'FN'
+    );
+
+  var TN =
+    safeGet(
+      counts,
+      'TN'
+    );
+
+
+  var precision =
+    safeDivide(
+      TP,
+      TP.add(
+        FP
+      )
+    );
+
+  var recall =
+    safeDivide(
+      TP,
+      TP.add(
+        FN
+      )
+    );
+
+  var f1 =
+    safeDivide(
+      TP.multiply(
+        2
+      ),
+      TP.multiply(
+        2
+      )
+      .add(
+        FP
+      )
+      .add(
+        FN
+      )
+    );
+
+  var iou =
+    safeDivide(
+      TP,
+      TP
+        .add(
+          FP
+        )
+        .add(
+          FN
+        )
+    );
+
+
+  return ee.Dictionary({
+    sensitivity_scenario:
+      scenarioName,
+
+    radial_radius_m:
+      radialRadiusM,
+
+    polygon_buffer_m:
+      polygonBufferM,
+
+    method_code:
+      methodCode,
+
+    method:
+      methodName,
+
+    TP_pixels:
+      TP,
+
+    TN_pixels:
+      TN,
+
+    FP_pixels:
+      FP,
+
+    FN_pixels:
+      FN,
+
+    precision:
+      precision,
+
+    recall:
+      recall,
+
+    F1:
+      f1,
+
+    IoU:
+      iou
+  });
+
+}
+
+
+function scoreFootprintSensitivityObjects(
+  sensitivityGT,
+  pred
+) {
+
+  pred =
+    pred
+      .clip(
+        scanningArea
+      )
+      .unmask(
+        0
+      )
+      .toByte()
+      .setDefaultProjection(
+        EVAL_PROJ
+      );
+
+
+  return sensitivityGT.map(
+    function(f) {
+
+      var evalGeom =
+        f.geometry()
+          .intersection(
+            scanningArea,
+            1
+          );
+
+      var objectTruth =
+        ee.Image.constant(
+          0
+        )
+        .toByte()
+        .paint({
+          featureCollection:
+            ee.FeatureCollection([
+              ee.Feature(
+                f
+              )
+            ]),
+
+          color:
+            1
+        })
+        .rename(
+          'object_truth'
+        )
+        .clip(
+          scanningArea
+        )
+        .setDefaultProjection(
+          EVAL_PROJ
+        )
+        .updateMask(
+          evaluationDomain
+        );
+
+      var gtPixelsImage =
+        objectTruth
+          .eq(
+            1
+          )
+          .rename(
+            'gt_pixels'
+          )
+          .toInt();
+
+      var overlapPixelsImage =
+        pred
+          .eq(
+            1
+          )
+          .and(
+            objectTruth.eq(
+              1
+            )
+          )
+          .rename(
+            'overlap_pixels'
+          )
+          .toInt();
+
+      var countImage =
+        ee.Image.cat([
+          gtPixelsImage,
+          overlapPixelsImage
+        ])
+        .updateMask(
+          evaluationDomain
+        )
+        .setDefaultProjection(
+          EVAL_PROJ
+        );
+
+      var counts =
+        countImage.reduceRegion({
+          reducer:
+            ee.Reducer
+              .sum()
+              .unweighted(),
+
+          geometry:
+            evalGeom,
+
+          scale:
+            SCALE,
+
+          crs:
+            AOI_CRS,
+
+          maxPixels:
+            1e10,
+
+          tileScale:
+            4
+        });
+
+      var gtPixels =
+        safeGet(
+          counts,
+          'gt_pixels'
+        );
+
+      var overlapPixels =
+        safeGet(
+          counts,
+          'overlap_pixels'
+        );
+
+      var overlapFraction =
+        safeDivide(
+          overlapPixels,
+          gtPixels
+        );
+
+      var evaluable =
+        ee.Number(
+          ee.Algorithms.If(
+            gtPixels.gt(
+              0
+            ),
+            1,
+            0
+          )
+        );
+
+      var detectedAny =
+        ee.Number(
+          ee.Algorithms.If(
+            overlapPixels.gt(
+              0
+            ),
+            1,
+            0
+          )
+        );
+
+      var detected10 =
+        ee.Number(
+          ee.Algorithms.If(
+            overlapFraction.gte(
+              0.10
+            ),
+            1,
+            0
+          )
+        );
+
+      var detected25 =
+        ee.Number(
+          ee.Algorithms.If(
+            overlapFraction.gte(
+              0.25
+            ),
+            1,
+            0
+          )
+        );
+
+      return f.set({
+        evaluable_object:
+          evaluable,
+
+        evaluable_gt_pixels:
+          gtPixels,
+
+        overlap_pixels:
+          overlapPixels,
+
+        overlap_fraction:
+          overlapFraction,
+
+        detected_any:
+          detectedAny,
+
+        detected_10pct:
+          detected10,
+
+        detected_25pct:
+          detected25
+      });
+
+    }
+  );
+
+}
+
+
+function summariseFootprintSensitivityObjects(
+  scoredObjects
+) {
+
+  var evaluableAll =
+    scoredObjects.filter(
+      ee.Filter.eq(
+        'evaluable_object',
+        1
+      )
+    );
+
+  var radialAll =
+    scoredObjects.filter(
+      ee.Filter.eq(
+        'object_type',
+        'radial'
+      )
+    );
+
+  var polygonAll =
+    scoredObjects.filter(
+      ee.Filter.eq(
+        'object_type',
+        'polygon'
+      )
+    );
+
+  var evaluableRadial =
+    radialAll.filter(
+      ee.Filter.eq(
+        'evaluable_object',
+        1
+      )
+    );
+
+  var evaluablePolygon =
+    polygonAll.filter(
+      ee.Filter.eq(
+        'evaluable_object',
+        1
+      )
+    );
+
+  var nAll =
+    scoredObjects.size();
+
+  var nEvalAll =
+    evaluableAll.size();
+
+  var nRadial =
+    radialAll.size();
+
+  var nEvalRadial =
+    evaluableRadial.size();
+
+  var nPolygon =
+    polygonAll.size();
+
+  var nEvalPolygon =
+    evaluablePolygon.size();
+
+  var collapsedPolygonCount =
+    polygonAll
+      .filter(
+        ee.Filter.eq(
+          'collapsed_polygon',
+          1
+        )
+      )
+      .size();
+
+
+  var allDetectedAny =
+    ee.Number(
+      evaluableAll.aggregate_sum(
+        'detected_any'
+      )
+    );
+
+  var allDetected10 =
+    ee.Number(
+      evaluableAll.aggregate_sum(
+        'detected_10pct'
+      )
+    );
+
+  var allDetected25 =
+    ee.Number(
+      evaluableAll.aggregate_sum(
+        'detected_25pct'
+      )
+    );
+
+  var allMeanCoverage =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalAll.gt(
+          0
+        ),
+        evaluableAll.aggregate_mean(
+          'overlap_fraction'
+        ),
+        0
+      )
+    );
+
+
+  var radialDetectedAny =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalRadial.gt(
+          0
+        ),
+        evaluableRadial.aggregate_sum(
+          'detected_any'
+        ),
+        0
+      )
+    );
+
+  var radialDetected10 =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalRadial.gt(
+          0
+        ),
+        evaluableRadial.aggregate_sum(
+          'detected_10pct'
+        ),
+        0
+      )
+    );
+
+  var radialDetected25 =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalRadial.gt(
+          0
+        ),
+        evaluableRadial.aggregate_sum(
+          'detected_25pct'
+        ),
+        0
+      )
+    );
+
+  var radialMeanCoverage =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalRadial.gt(
+          0
+        ),
+        evaluableRadial.aggregate_mean(
+          'overlap_fraction'
+        ),
+        0
+      )
+    );
+
+
+  var polygonDetectedAny =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalPolygon.gt(
+          0
+        ),
+        evaluablePolygon.aggregate_sum(
+          'detected_any'
+        ),
+        0
+      )
+    );
+
+  var polygonDetected10 =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalPolygon.gt(
+          0
+        ),
+        evaluablePolygon.aggregate_sum(
+          'detected_10pct'
+        ),
+        0
+      )
+    );
+
+  var polygonDetected25 =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalPolygon.gt(
+          0
+        ),
+        evaluablePolygon.aggregate_sum(
+          'detected_25pct'
+        ),
+        0
+      )
+    );
+
+  var polygonMeanCoverage =
+    ee.Number(
+      ee.Algorithms.If(
+        nEvalPolygon.gt(
+          0
+        ),
+        evaluablePolygon.aggregate_mean(
+          'overlap_fraction'
+        ),
+        0
+      )
+    );
+
+
+  return ee.Dictionary({
+    objects_total:
+      nAll,
+
+    objects_evaluable:
+      nEvalAll,
+
+    objects_detected_any:
+      allDetectedAny,
+
+    objects_detected_any_rate:
+      safeDivide(
+        allDetectedAny,
+        nEvalAll
+      ),
+
+    objects_detected_10pct:
+      allDetected10,
+
+    objects_detected_10pct_rate:
+      safeDivide(
+        allDetected10,
+        nEvalAll
+      ),
+
+    objects_detected_25pct:
+      allDetected25,
+
+    objects_detected_25pct_rate:
+      safeDivide(
+        allDetected25,
+        nEvalAll
+      ),
+
+    mean_object_coverage:
+      allMeanCoverage,
+
+    radial_objects_total:
+      nRadial,
+
+    radial_objects_evaluable:
+      nEvalRadial,
+
+    radial_objects_detected_any:
+      radialDetectedAny,
+
+    radial_objects_detected_any_rate:
+      safeDivide(
+        radialDetectedAny,
+        nEvalRadial
+      ),
+
+    radial_objects_detected_10pct:
+      radialDetected10,
+
+    radial_objects_detected_10pct_rate:
+      safeDivide(
+        radialDetected10,
+        nEvalRadial
+      ),
+
+    radial_objects_detected_25pct:
+      radialDetected25,
+
+    radial_objects_detected_25pct_rate:
+      safeDivide(
+        radialDetected25,
+        nEvalRadial
+      ),
+
+    mean_radial_object_coverage:
+      radialMeanCoverage,
+
+    polygon_objects_total:
+      nPolygon,
+
+    polygon_objects_evaluable:
+      nEvalPolygon,
+
+    polygon_objects_detected_any:
+      polygonDetectedAny,
+
+    polygon_objects_detected_any_rate:
+      safeDivide(
+        polygonDetectedAny,
+        nEvalPolygon
+      ),
+
+    polygon_objects_detected_10pct:
+      polygonDetected10,
+
+    polygon_objects_detected_10pct_rate:
+      safeDivide(
+        polygonDetected10,
+        nEvalPolygon
+      ),
+
+    polygon_objects_detected_25pct:
+      polygonDetected25,
+
+    polygon_objects_detected_25pct_rate:
+      safeDivide(
+        polygonDetected25,
+        nEvalPolygon
+      ),
+
+    mean_polygon_object_coverage:
+      polygonMeanCoverage,
+
+    collapsed_polygon_count:
+      collapsedPolygonCount
+  });
+
+}
+
+
+function radialFootprintOverlapDiagnostics(
+  sensitivityGT,
+  radialRadiusM
+) {
+
+  radialRadiusM =
+    ee.Number(
+      radialRadiusM
+    );
+
+  var radials =
+    sensitivityGT.filter(
+      ee.Filter.eq(
+        'object_type',
+        'radial'
+      )
+    );
+
+  var radialCount =
+    radials.size();
+
+  var withOverlapCounts =
+    radials.map(
+      function(f) {
+
+        var thisID =
+          ee.String(
+            f.get(
+              'validation_id'
+            )
+          );
+
+        var thisCentre =
+          f.geometry()
+            .centroid(
+              1
+            );
+
+        var candidatePartners =
+          radials.filterBounds(
+            f.geometry()
+              .buffer(
+                radialRadiusM.multiply(
+                  2
+                ),
+                1
+              )
+          );
+
+        var testedPartners =
+          candidatePartners.map(
+            function(g) {
+
+              var otherID =
+                ee.String(
+                  g.get(
+                    'validation_id'
+                  )
+                );
+
+              var sameObject =
+                thisID.compareTo(
+                  otherID
+                )
+                .eq(
+                  0
+                );
+
+              var otherCentre =
+                g.geometry()
+                  .centroid(
+                    1
+                  );
+
+              var centreDistance =
+                thisCentre.distance(
+                  otherCentre,
+                  1
+                );
+
+              var positiveAreaOverlap =
+                centreDistance.lt(
+                  radialRadiusM.multiply(
+                    2
+                  )
+                );
+
+              var isOverlap =
+                ee.Number(
+                  ee.Algorithms.If(
+                    sameObject,
+                    0,
+                    ee.Algorithms.If(
+                      positiveAreaOverlap,
+                      1,
+                      0
+                    )
+                  )
+                );
+
+              return g.set(
+                'is_overlap_partner',
+                isOverlap
+              );
+
+            }
+          );
+
+        var overlapPartners =
+          testedPartners
+            .filter(
+              ee.Filter.eq(
+                'is_overlap_partner',
+                1
+              )
+            )
+            .size();
+
+        return f.set(
+          'overlap_partner_count',
+          overlapPartners
+        );
+
+      }
+    );
+
+  var summedPartnerCounts =
+    ee.Number(
+      ee.Algorithms.If(
+        radialCount.gt(
+          0
+        ),
+        withOverlapCounts.aggregate_sum(
+          'overlap_partner_count'
+        ),
+        0
+      )
+    );
+
+  var overlapPairs =
+    summedPartnerCounts.divide(
+      2
+    );
+
+  var objectsInvolved =
+    withOverlapCounts
+      .filter(
+        ee.Filter.gt(
+          'overlap_partner_count',
+          0
+        )
+      )
+      .size();
+
+  var maxPartners =
+    ee.Number(
+      ee.Algorithms.If(
+        radialCount.gt(
+          0
+        ),
+        withOverlapCounts.aggregate_max(
+          'overlap_partner_count'
+        ),
+        0
+      )
+    );
+
+  return ee.Dictionary({
+    overlapping_radial_pairs:
+      overlapPairs,
+
+    radial_objects_involved_in_overlap:
+      objectsInvolved,
+
+    radial_objects_overlap_rate:
+      safeDivide(
+        objectsInvolved,
+        radialCount
+      ),
+
+    maximum_radial_overlap_partners:
+      maxPartners
+  });
+
+}
+
+
+function makeFootprintSensitivityRow(
+  scenarioName,
+  radialRadiusM,
+  polygonBufferM,
+  methodCode,
+  methodName,
+  pred,
+  sensitivityGT,
+  sensitivityTruth,
+  overlapDiagnostics
+) {
+
+  var pixelSummary =
+    footprintSensitivityPixelMetrics(
+      scenarioName,
+      radialRadiusM,
+      polygonBufferM,
+      methodCode,
+      methodName,
+      pred,
+      sensitivityTruth
+    );
+
+  var scoredObjects =
+    scoreFootprintSensitivityObjects(
+      sensitivityGT,
+      pred
+    );
+
+  var objectSummary =
+    summariseFootprintSensitivityObjects(
+      scoredObjects
+    );
+
+  var combinedDictionary =
+    ee.Dictionary(
+      pixelSummary
+    )
+    .combine(
+      objectSummary,
+      true
+    )
+    .combine(
+      overlapDiagnostics,
+      true
+    );
+
+  return ee.Feature(
+    null,
+    combinedDictionary
+  )
+  .set({
+    region:
+      REGION,
+
+    development_year:
+      DEVELOPMENT_YEAR,
+
+    evaluation_year:
+      YEAR,
+
+    sensitivity_type:
+      'validation footprint boundary displacement',
+
+    boundary_displacement_m:
+      polygonBufferM,
+
+    primary_radial_radius_m:
+      ISOLATED_RADIUS_M,
+
+    predictions_fixed:
+      1,
+
+    classifiers_retrained:
+      0,
+
+    thresholds_changed:
+      0,
+
+    scale_m:
+      SCALE,
+
+    evaluation_crs:
+      AOI_CRS,
+
+    minimum_connected_pixels:
+      MIN_CONNECTED_PIXELS,
+
+    land_water_mask:
+      'ESA WorldCover 2021 class 80',
+
+    pixel_overlap_handling:
+      'validation geometries rasterised as union; overlapping truth pixels counted once',
+
+    object_overlap_handling:
+      'objects scored individually; shared pixels may contribute to multiple object summaries'
+  });
+
+}
+
+
+var footprintSensitivityResults =
+  ee.FeatureCollection([]);
+
+
+FOOTPRINT_SCENARIOS.forEach(
+  function(scenario) {
+
+    var scenarioName =
+      scenario.name;
+
+    var radialRadiusM =
+      scenario.radial_radius_m;
+
+    var polygonBufferM =
+      scenario.polygon_buffer_m;
+
+    var sensitivityGT =
+      buildFootprintSensitivityGroundTruth(
+        scenarioName,
+        radialRadiusM,
+        polygonBufferM
+      );
+
+    var sensitivityTruth =
+      buildFootprintSensitivityTruthRaster(
+        sensitivityGT
+      );
+
+    var overlapDiagnostics =
+      radialFootprintOverlapDiagnostics(
+        sensitivityGT,
+        radialRadiusM
+      );
+
+    var scenarioResults =
+      ee.FeatureCollection([
+
+        makeFootprintSensitivityRow(
+          scenarioName,
+          radialRadiusM,
+          polygonBufferM,
+          'COS90',
+          'Cosine 90% target retention',
+          cosineFinal90,
+          sensitivityGT,
+          sensitivityTruth,
+          overlapDiagnostics
+        ),
+
+        makeFootprintSensitivityRow(
+          scenarioName,
+          radialRadiusM,
+          polygonBufferM,
+          'COS95',
+          'Cosine 95% target retention',
+          cosineFinal95,
+          sensitivityGT,
+          sensitivityTruth,
+          overlapDiagnostics
+        ),
+
+        makeFootprintSensitivityRow(
+          scenarioName,
+          radialRadiusM,
+          polygonBufferM,
+          'COS99',
+          'Cosine 99% target retention',
+          cosineFinal99,
+          sensitivityGT,
+          sensitivityTruth,
+          overlapDiagnostics
+        ),
+
+        makeFootprintSensitivityRow(
+          scenarioName,
+          radialRadiusM,
+          polygonBufferM,
+          'SRF',
+          'Standard Random Forest',
+          srfFinal,
+          sensitivityGT,
+          sensitivityTruth,
+          overlapDiagnostics
+        ),
+
+        makeFootprintSensitivityRow(
+          scenarioName,
+          radialRadiusM,
+          polygonBufferM,
+          'CRRF',
+          'Class-Relationship Random Forest',
+          crrfFinal,
+          sensitivityGT,
+          sensitivityTruth,
+          overlapDiagnostics
+        )
+
+      ]);
+
+    footprintSensitivityResults =
+      footprintSensitivityResults.merge(
+        scenarioResults
+      );
+
+  }
+);
+
+
+print(
+  '================================================='
+);
+
+print(
+  'TASMANIA VALIDATION-FOOTPRINT SENSITIVITY ANALYSIS'
+);
+
+print(
+  '================================================='
+);
+
+print(
+  'Sensitivity scenarios:',
+  FOOTPRINT_SCENARIOS
+);
+
+print(
+  'FOOTPRINT SENSITIVITY RESULTS:',
+  footprintSensitivityResults
+);
+
+
+FOOTPRINT_SCENARIOS.forEach(
+  function(scenario) {
+
+    var sensitivityGT =
+      buildFootprintSensitivityGroundTruth(
+        scenario.name,
+        scenario.radial_radius_m,
+        scenario.polygon_buffer_m
+      );
+
+    var collapsedPolygons =
+      sensitivityGT
+        .filter(
+          ee.Filter.eq(
+            'object_type',
+            'polygon'
+          )
+        )
+        .filter(
+          ee.Filter.eq(
+            'collapsed_polygon',
+            1
+          )
+        )
+        .size();
+
+    print(
+      scenario.name +
+      ' - collapsed polygons:',
+      collapsedPolygons
+    );
+
+    print(
+      scenario.name +
+      ' - radial overlap diagnostic:',
+      radialFootprintOverlapDiagnostics(
+        sensitivityGT,
+        scenario.radial_radius_m
+      )
+    );
+
+  }
+);
+
+
+FOOTPRINT_SCENARIOS.forEach(
+  function(scenario) {
+
+    var sensitivityGT =
+      buildFootprintSensitivityGroundTruth(
+        scenario.name,
+        scenario.radial_radius_m,
+        scenario.polygon_buffer_m
+      );
+
+    var outline =
+      ee.Image()
+        .byte()
+        .paint({
+          featureCollection:
+            sensitivityGT,
+
+          color:
+            1,
+
+          width:
+            1
+        });
+
+    Map.addLayer(
+      outline,
+      {},
+      'Validation sensitivity - ' +
+      scenario.name,
+      false
+    );
+
+  }
+);
+
+
+Export.table.toDrive({
+  collection:
+    footprintSensitivityResults,
+
+  description:
+    'Tasmania_2025_validation_footprint_sensitivity',
+
+  fileNamePrefix:
+    'Tasmania_2025_validation_footprint_sensitivity',
+
+  folder:
+    FOOTPRINT_SENSITIVITY_EXPORT_FOLDER,
+
+  fileFormat:
+    'CSV'
+});
+
+
+print(
+  'Sensitivity export task created:'
+);
+
+print(
+  'Tasmania_2025_validation_footprint_sensitivity.csv'
+);
+
+print(
+  'QA REQUIREMENT: NOMINAL scenario must reproduce existing 50 m main metrics.'
+);
+
+print(
+  '================================================='
+);
+
+print(
+  'TASMANIA VALIDATION-FOOTPRINT SENSITIVITY READY'
+);
+
+print(
+  '================================================='
+);
