@@ -58,3 +58,17 @@ The workflow uses:
 
 - [Google Earth Engine](https://earthengine.google.com/) for AEF access, spatial analysis and classification;
 - R for prototype selection, feature assessment and supporting analyses.
+
+## Licence
+
+Original research data and documentation in this repository are made available under the [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) licence. These materials may be shared, adapted and reused, provided appropriate attribution is given.
+
+See the [LICENSE](LICENSE) file for details.
+
+Third-party datasets, including AlphaEarth Foundations embeddings, Sentinel imagery and national aquaculture records, remain subject to their respective licensing and attribution requirements.
+
+## Citation
+
+If you use materials from this repository, please cite the archived research materials:
+
+https://doi.org/10.5281/zenodo.22990280
